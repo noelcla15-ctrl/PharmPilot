@@ -12,100 +12,83 @@ import stat
 import json
 
 # ==========================================
-# ⚙️ CONFIGURATION & TOTAL COLOR CONTROL CSS
+# ⚙️ CONFIGURATION & THEME ENGINE
 # ==========================================
 st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="centered")
 
-st.markdown("""
+# --- THEME CSS DEFINITIONS ---
+LIGHT_THEME = """
 <style>
-    /* --- 1. FORCE LIGHT THEME BACKGROUNDS --- */
-    /* Main Area Background */
-    .stApp {
-        background-color: #FFFFFF;
+    /* Global Text */
+    .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, span, div, label { color: #000000 !important; }
+    /* Backgrounds */
+    .stApp { background-color: #FFFFFF; }
+    [data-testid="stSidebar"] { background-color: #F0F2F6; border-right: 1px solid #E6E6E6; }
+    /* Inputs */
+    input, textarea, select, .stSelectbox div[data-baseweb="select"] > div { 
+        background-color: #FFFFFF !important; color: #000000 !important; 
     }
-    
-    /* Sidebar Background (Force White) */
-    [data-testid="stSidebar"] {
-        background-color: #F0F2F6;
-        border-right: 1px solid #E6E6E6;
-    }
-    
-    /* --- 2. FORCE TEXT COLORS (The "Visible" Fix) --- */
-    /* Force ALL text in the main area AND sidebar to be Dark Gray */
-    .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, span, div, label {
-        color: #000000 !important;
-    }
-    
-    /* Fix Input Fields (Text Boxes, Selects) so typing is visible */
-    input, textarea, select {
-        color: #000000 !important;
-        background-color: #FFFFFF !important;
-    }
-    
-    /* Fix Dropdown Menus (Selectbox) */
-    div[data-baseweb="select"] > div {
-        background-color: #FFFFFF !important;
-        color: #000000 !important;
-    }
-    
-    /* --- 3. CUSTOM COMPONENT STYLING --- */
-    /* Flashcard Style */
-    .flashcard {
-        background-color: white;
-        padding: 40px;
-        border-radius: 15px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        border: 1px solid #E0E0E0;
-        border-left: 6px solid #4F8BF9;
-        font-size: 20px;
-        margin-bottom: 20px;
-        color: #000000 !important;
-    }
-    
-    .flashcard-back {
-        background-color: #eef6ff;
-        border-left: 6px solid #00c853;
-        color: #000000 !important;
-    }
-    
-    /* Clean Expanders (White background, gray border) */
-    div[data-testid="stExpander"] {
-        background-color: #FFFFFF !important;
-        border: 1px solid #E0E0E0;
-        border-radius: 8px;
-        margin-bottom: 10px;
-    }
-    
-    /* Radio Buttons in Sidebar */
-    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
-        font-size: 16px;
-        font-weight: 500;
-    }
-    
-    /* --- 4. BUTTON EXCEPTION --- */
-    /* Allow buttons to keep their own text colors (so white text on blue/red buttons stays white) */
-    button p {
-        color: inherit !important;
-    }
-    button div {
-        color: inherit !important;
-    }
-    
-    /* Make buttons pop */
-    .stButton>button {
-        border-radius: 8px;
-        height: 3em;
-        font-weight: 600;
-        border: none;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        transition: transform 0.1s;
-    }
-    .stButton>button:active {
-        transform: scale(0.98);
-    }
+    /* Components */
+    .flashcard { background-color: white; border: 1px solid #E0E0E0; border-left: 6px solid #4F8BF9; color: #000000 !important; }
+    .flashcard-back { background-color: #eef6ff; border-left: 6px solid #00c853; color: #000000 !important; }
+    div[data-testid="stExpander"] { background-color: #FFFFFF !important; border: 1px solid #E0E0E0; }
 </style>
-""", unsafe_allow_html=True)
+"""
 
+DARK_THEME = """
+<style>
+    /* Global Text */
+    .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, span, div, label { color: #E0E0E0 !important; }
+    /* Backgrounds */
+    .stApp { background-color: #0E1117; }
+    [data-testid="stSidebar"] { background-color: #262730; border-right: 1px solid #333; }
+    /* Inputs */
+    input, textarea, select { background-color: #1E1E1E !important; color: #E0E0E0 !important; }
+    .stSelectbox div[data-baseweb="select"] > div { background-color: #1E1E1E !important; color: #E0E0E0 !important; }
+    /* Components */
+    .flashcard { 
+        background-color: #1E1E1E; 
+        padding: 40px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        border: 1px solid #333; border-left: 6px solid #4F8BF9; 
+        font-size: 20px; margin-bottom: 20px; color: #E0E0E0 !important; 
+    }
+    .flashcard-back { 
+        background-color: #162B1E; 
+        border-left: 6px solid #00c853; 
+        color: #E0E0E0 !important; 
+    }
+    div[data-testid="stExpander"] { background-color: #1E1E1E !important; border: 1px solid #333; }
+    /* Fix Tab Colors */
+    button[data-baseweb="tab"] { background-color: transparent !important; }
+</style>
+"""
+
+# SHARED CSS (Layouts that apply to both)
+SHARED_CSS = """
+<style>
+    /* Button Exceptions (Keep text color inherent) */
+    button p, button div { color: inherit !important; }
+    /* Button Pop */
+    .stButton>button { border-radius: 8px; height: 3em; font-weight: 600; border: none; box-shadow: 0 2px 4px rgba(0,0,0,0.2); transition: transform 0.1s; }
+    .stButton>button:active { transform: scale(0.98); }
+</style>
+"""
+
+# --- SIDEBAR TOGGLE ---
+st.sidebar.title("💊 PharmPilot")
+dark_mode = st.sidebar.toggle("🌗 Dark Mode", value=True) # Default to Dark Mode since you liked it
+
+# INJECT CSS BASED ON TOGGLE
+if dark_mode:
+    st.markdown(DARK_THEME + SHARED_CSS, unsafe_allow_html=True)
+else:
+    st.markdown(LIGHT_THEME + SHARED_CSS, unsafe_allow_html=True)
+
+st.sidebar.markdown("---")
+
+# ==========================================
+# ⚙️ SECRETS & SETUP
+# ==========================================
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     DB_URL = st.secrets["SUPABASE_DB_URL"]
@@ -115,7 +98,6 @@ except Exception:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# SAFETY SETTINGS
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -123,7 +105,6 @@ safety_settings = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-# --- ENGINES ---
 flash_model = genai.GenerativeModel('gemini-2.5-flash', safety_settings=safety_settings)
 quiz_model = genai.GenerativeModel('gemini-2.5-pro', safety_settings=safety_settings)
 
@@ -131,9 +112,6 @@ SLIDE_DIR = "lecture_slides"
 if not os.path.exists(SLIDE_DIR):
     os.makedirs(SLIDE_DIR)
 
-# ==========================================
-# 🗄️ DATABASE
-# ==========================================
 @st.cache_resource
 def get_db_connection():
     return psycopg2.connect(DB_URL)
@@ -173,24 +151,17 @@ def generate_cards_batch_json(images, objectives, start_idx):
     prompt = f"""
     You are a Pharmacy Professor. Review these {len(images)} slides (Slides {start_idx+1}-{start_idx+len(images)}).
     OBJECTIVES: {objectives}
-    
     INSTRUCTIONS:
     1. SCOPE: Identify the most important exam-relevant facts.
     2. DENSITY: Create roughly 1 card per slide on average.
     3. FILTER: Skip Title slides and generic "Objectives" slides.
-    
     IMPORTANT: Return a raw JSON list of objects. Do NOT use Markdown formatting.
-    Structure:
-    [
-        {{"front": "Question...", "back": "Answer..."}}
-    ]
+    Structure: [ {{"front": "Question...", "back": "Answer..."}} ]
     """
-    
     try:
         response = flash_model.generate_content([prompt] + images)
         clean_text = response.text.replace("```json", "").replace("```", "").strip()
         data = json.loads(clean_text)
-        
         valid_cards = []
         for item in data:
             if 'front' in item and 'back' in item:
@@ -204,15 +175,7 @@ def generate_interactive_quiz(images):
     Create a 5-question multiple choice quiz based on these slides.
     Target Audience: Pharmacy Students (NAPLEX level).
     IMPORTANT: Return ONLY a JSON list. Do not use Markdown blocks.
-    Structure: 
-    [
-        {
-            "question": "...",
-            "options": ["A) ...", "B) ..."],
-            "correct_index": 0,
-            "explanation": "..."
-        }
-    ]
+    Structure: [ { "question": "...", "options": ["A) ...", "B) ..."], "correct_index": 0, "explanation": "..." } ]
     """
     try:
         content = [prompt] + images
@@ -223,11 +186,8 @@ def generate_interactive_quiz(images):
         return [{"error": str(e)}]
 
 # ==========================================
-# 🖥️ UI LAYOUT
+# 🖥️ UI LOGIC
 # ==========================================
-st.sidebar.title("💊 PharmPilot")
-st.sidebar.markdown("---")
-
 if 'main_nav' not in st.session_state:
     st.session_state.main_nav = "Review"
 
@@ -240,12 +200,9 @@ def open_lecture_callback(lid):
     st.session_state.active_lecture_id = lid
     st.session_state.main_nav = "Active Learning"
 
-# ------------------------------------------
-# 1. REVIEW DASHBOARD
-# ------------------------------------------
+# --- 1. REVIEW DASHBOARD ---
 if nav == "Review":
     st.title("🧠 Daily Review")
-    
     today = date.today()
     c.execute("""
         SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.exam_id, e.exam_date
@@ -276,45 +233,31 @@ if nav == "Review":
             if revs > 6 and interval < 2:
                 st.warning("⚠️ Difficult Card (Leech)")
 
-            # FRONT CARD
             st.markdown(f"""
             <div class="flashcard">
-                <div style="font-size:14px; color:#888; margin-bottom:10px;">QUESTION</div>
+                <div style="font-size:14px; opacity:0.7; margin-bottom:10px;">QUESTION</div>
                 {front}
             </div>
             """, unsafe_allow_html=True)
             
-            # BACK CARD
             if st.session_state.show:
                 st.markdown(f"""
                 <div class="flashcard flashcard-back">
-                     <div style="font-size:14px; color:#888; margin-bottom:10px;">ANSWER</div>
+                     <div style="font-size:14px; opacity:0.7; margin-bottom:10px;">ANSWER</div>
                     {back}
                 </div>
                 """, unsafe_allow_html=True)
                 
                 def answer(quality):
-                    new_ease = ease
-                    new_interval = interval
-                    
-                    if quality == 0: 
-                        new_interval = 1
-                        new_ease = max(1.3, ease - 0.2)
-                    elif quality == 3: 
-                        new_interval = max(1, int(interval * 1.2))
-                        new_ease = max(1.3, ease - 0.15)
-                    elif quality == 4: 
-                        new_interval = max(1, int(interval * ease))
-                    elif quality == 5: 
-                        new_interval = max(1, int(interval * ease * 1.3))
-                        new_ease = min(3.0, ease + 0.15)
-
+                    new_ease, new_interval = ease, interval
+                    if quality == 0: new_interval, new_ease = 1, max(1.3, ease - 0.2)
+                    elif quality == 3: new_interval, new_ease = max(1, int(interval * 1.2)), max(1.3, ease - 0.15)
+                    elif quality == 4: new_interval = max(1, int(interval * ease))
+                    elif quality == 5: new_interval, new_ease = max(1, int(interval * ease * 1.3)), min(3.0, ease + 0.15)
                     if exam_date:
-                        days_until_exam = (exam_date - today).days
-                        if days_until_exam > 0 and new_interval >= days_until_exam:
-                            new_interval = max(1, days_until_exam - 1)
-                    
-                    c.execute("""UPDATE cards SET next_review=%s, interval=%s, ease=%s, review_count=%s WHERE id=%s""", 
+                        days_until = (exam_date - today).days
+                        if days_until > 0 and new_interval >= days_until: new_interval = max(1, days_until - 1)
+                    c.execute("UPDATE cards SET next_review=%s, interval=%s, ease=%s, review_count=%s WHERE id=%s", 
                              (today + timedelta(days=new_interval), new_interval, new_ease, revs + 1, cid))
                     conn.commit()
                     st.session_state.show = False
@@ -326,38 +269,26 @@ if nav == "Review":
                 if c2.button("😓 Hard", use_container_width=True): answer(3)
                 if c3.button("✅ Good", use_container_width=True): answer(4)
                 if c4.button("🚀 Easy", use_container_width=True): answer(5)
-
             else:
                 if st.button("Show Answer", type="primary", use_container_width=True): 
                     st.session_state.show = True
                     st.rerun()
         else:
             st.success("Session Complete!")
-            if st.button("Start Over"):
-                st.session_state.idx = 0
-                st.rerun()
+            if st.button("Start Over"): st.session_state.idx = 0; st.rerun()
 
-# ------------------------------------------
-# 2. LIBRARY
-# ------------------------------------------
+# --- 2. LIBRARY ---
 elif nav == "Library":
     st.title("📂 Library")
-    
     tab_browse, tab_upload, tab_manage = st.tabs(["📚 Browse Materials", "☁️ Upload New", "⚙️ Manage"])
     
     with tab_browse:
-        big_query = """
-            SELECT c.name as class_name, e.name as exam_name, e.id as exam_id,
-                   l.id as lecture_id, l.name as lecture_name, l.slide_count
-            FROM classes c
-            JOIN exams e ON e.class_id = c.id
-            LEFT JOIN lectures l ON l.exam_id = e.id
-            ORDER BY c.name, e.name, l.name
-        """
+        big_query = """SELECT c.name as class_name, e.name as exam_name, e.id as exam_id,
+                       l.id as lecture_id, l.name as lecture_name, l.slide_count
+                       FROM classes c JOIN exams e ON e.class_id = c.id
+                       LEFT JOIN lectures l ON l.exam_id = e.id ORDER BY c.name, e.name, l.name"""
         df = pd.read_sql(big_query, conn)
-        
-        if df.empty:
-            st.info("Library is empty. Go to 'Upload New' to start!")
+        if df.empty: st.info("Library is empty.")
         else:
             for class_name, class_group in df.groupby("class_name"):
                 with st.expander(f"📁 {class_name}", expanded=False):
@@ -365,10 +296,7 @@ elif nav == "Library":
                         st.caption(f"📂 {exam_name}")
                         for _, row in exam_group.iterrows():
                             if pd.notna(row['lecture_name']):
-                                lid = int(row['lecture_id'])
-                                lname = row['lecture_name']
-                                lcount = int(row['slide_count'])
-                                
+                                lid, lname, lcount = int(row['lecture_id']), row['lecture_name'], int(row['slide_count'])
                                 c1, c2, c3 = st.columns([0.6, 0.2, 0.2])
                                 with c1: st.markdown(f"**{lname}**")
                                 with c2: st.button("Open", key=f"op_{lid}", on_click=open_lecture_callback, args=(lid,))
@@ -380,7 +308,6 @@ elif nav == "Library":
                                                             key=lambda x: int(x.split('_')[1].split('.')[0]))
                                             images = [PIL.Image.open(os.path.join(lec_path, s)) for s in slides]
                                             st.toast(f"Processing {len(images)} slides...", icon="⚡")
-                                            # SAFE LOOP
                                             for i in range(0, len(images), 10):
                                                 batch = images[i : i + 10]
                                                 new_cards, _ = generate_cards_batch_json(batch, "Review", i)
@@ -394,64 +321,48 @@ elif nav == "Library":
     with tab_upload:
         c.execute("SELECT id, name FROM classes")
         classes = c.fetchall()
-        
-        if not classes:
-            st.warning("Create a Class in 'Manage' tab first!")
+        if not classes: st.warning("Create a Class in 'Manage' tab first!")
         else:
             c_map = {n: i for i, n in classes}
             sel_c = st.selectbox("Select Class", list(c_map.keys()))
-            
             c.execute("SELECT id, name FROM exams WHERE class_id=%s", (c_map[sel_c],))
             exams = c.fetchall()
-            
-            with st.expander("➕ Add New Topic to this Class"):
+            with st.expander("➕ Add New Topic"):
                 new_topic = st.text_input("Topic Name")
                 d_val = st.date_input("Exam Date")
                 if st.button("Create Topic"):
-                    c.execute("INSERT INTO exams (class_id, name, exam_date) VALUES (%s,%s,%s)", 
-                              (c_map[sel_c], new_topic, d_val))
+                    c.execute("INSERT INTO exams (class_id, name, exam_date) VALUES (%s,%s,%s)", (c_map[sel_c], new_topic, d_val))
                     conn.commit(); st.rerun()
-
             if exams:
                 e_map = {n: i for i, n in exams}
-                sel_e = st.selectbox("Select Topic to Upload PDFs", list(e_map.keys()))
+                sel_e = st.selectbox("Select Topic", list(e_map.keys()))
                 uploaded_files = st.file_uploader("Drop PDFs Here", type="pdf", accept_multiple_files=True)
-                objs = st.text_area("Learning Objectives (Optional)")
-                
+                objs = st.text_area("Learning Objectives")
                 if uploaded_files and st.button("🚀 Upload & Process", type="primary"):
                     status = st.status("Processing...", expanded=True)
                     for idx, uploaded in enumerate(uploaded_files):
                         status.write(f"Reading {uploaded.name}...")
-                        c.execute("INSERT INTO lectures (exam_id, name, slide_count) VALUES (%s,%s,%s) RETURNING id", 
-                                  (e_map[sel_e], uploaded.name, 0))
+                        c.execute("INSERT INTO lectures (exam_id, name, slide_count) VALUES (%s,%s,%s) RETURNING id", (e_map[sel_e], uploaded.name, 0))
                         lid = c.fetchone()[0]
                         conn.commit()
                         images = save_slides_locally(uploaded, lid)
                         c.execute("UPDATE lectures SET slide_count=%s WHERE id=%s", (len(images), lid))
                         conn.commit()
-                        
                         status.write("Generating Flashcards...")
                         for i in range(0, len(images), 10):
                             batch = images[i : i + 10]
                             new_cards, _ = generate_cards_batch_json(batch, objs, i)
                             if new_cards:
                                 for f, b in new_cards:
-                                    c.execute("INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)", 
-                                              (lid, f, b, date.today()))
+                                    c.execute("INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)", (lid, f, b, date.today()))
                                 conn.commit()
                     status.update(label="Complete!", state="complete", expanded=False)
-                    st.success("Upload Finished!")
-                    time.sleep(1)
-                    st.rerun()
+                    st.success("Upload Finished!"); time.sleep(1); st.rerun()
 
     with tab_manage:
         new_class = st.text_input("Create New Class Name")
-        if st.button("Create Class"):
-            c.execute("INSERT INTO classes (name) VALUES (%s)", (new_class,))
-            conn.commit(); st.rerun()
-        
-        st.write("---")
-        st.write("🗑️ **Danger Zone**")
+        if st.button("Create Class"): c.execute("INSERT INTO classes (name) VALUES (%s)", (new_class,)); conn.commit(); st.rerun()
+        st.write("---"); st.write("🗑️ **Danger Zone**")
         c.execute("SELECT id, name FROM exams")
         all_exams = c.fetchall()
         if all_exams:
@@ -461,75 +372,45 @@ elif nav == "Library":
                 eid = e_del_map[del_target]
                 c.execute("SELECT id FROM lectures WHERE exam_id=%s", (eid,))
                 l_ids = c.fetchall()
-                for (lid,) in l_ids:
-                    shutil.rmtree(os.path.join(SLIDE_DIR, str(lid)), ignore_errors=True)
-                c.execute("DELETE FROM exams WHERE id=%s", (eid,))
-                conn.commit(); st.rerun()
+                for (lid,) in l_ids: shutil.rmtree(os.path.join(SLIDE_DIR, str(lid)), ignore_errors=True)
+                c.execute("DELETE FROM exams WHERE id=%s", (eid,)); conn.commit(); st.rerun()
 
-# ------------------------------------------
-# 3. ACTIVE LEARNING
-# ------------------------------------------
+# --- 3. ACTIVE LEARNING ---
 elif nav == "Active Learning":
     st.title("👨‍🏫 Active Learning")
-    
     c.execute("SELECT l.id, l.name, e.name FROM lectures l JOIN exams e ON l.exam_id = e.id")
     all_lecs = c.fetchall()
-    
-    if not all_lecs:
-        st.info("No lectures found.")
+    if not all_lecs: st.info("No lectures found.")
     else:
-        l_ids = [l[0] for l in all_lecs]
-        l_labels = [f"{l[1]} ({l[2]})" for l in all_lecs]
-        
-        default_idx = 0
-        if 'active_lecture_id' in st.session_state and st.session_state.active_lecture_id in l_ids:
-            default_idx = l_ids.index(st.session_state.active_lecture_id)
-            
+        l_ids, l_labels = [l[0] for l in all_lecs], [f"{l[1]} ({l[2]})" for l in all_lecs]
+        default_idx = l_ids.index(st.session_state.active_lecture_id) if 'active_lecture_id' in st.session_state and st.session_state.active_lecture_id in l_ids else 0
         sel_label = st.selectbox("Current Lecture", l_labels, index=default_idx)
         lid = l_ids[l_labels.index(sel_label)]
-        
         lec_path = os.path.join(SLIDE_DIR, str(lid))
         if os.path.exists(lec_path):
-            slides = sorted([f for f in os.listdir(lec_path) if f.endswith(".png")], 
-                            key=lambda x: int(x.split('_')[1].split('.')[0]))
-            
+            slides = sorted([f for f in os.listdir(lec_path) if f.endswith(".png")], key=lambda x: int(x.split('_')[1].split('.')[0]))
             if 'read_idx' not in st.session_state: st.session_state.read_idx = 0
             start = st.session_state.read_idx
-            
             col_slides, col_tools = st.columns([2, 1])
-            
             with col_slides:
                 end = min(start + 5, len(slides))
-                st.caption(f"Slides {start+1}-{end} of {len(slides)}")
-                st.progress(end/len(slides))
-                
+                st.caption(f"Slides {start+1}-{end} of {len(slides)}"); st.progress(end/len(slides))
                 current_images = []
                 for i in range(start, end):
-                    img_path = os.path.join(lec_path, slides[i])
-                    img = PIL.Image.open(img_path)
-                    current_images.append(img)
-                    st.image(img, use_container_width=True)
-                
+                    img = PIL.Image.open(os.path.join(lec_path, slides[i]))
+                    current_images.append(img); st.image(img, use_container_width=True)
                 c_prev, c_next = st.columns(2)
                 if c_prev.button("⬅️ Previous", use_container_width=True) and start > 0:
-                    st.session_state.read_idx = max(0, start - 5)
-                    st.session_state.quiz_data = None
-                    st.rerun()
+                    st.session_state.read_idx = max(0, start - 5); st.session_state.quiz_data = None; st.rerun()
                 if c_next.button("Next ➡️", use_container_width=True) and end < len(slides):
-                    st.session_state.read_idx = end
-                    st.session_state.quiz_data = None
-                    st.rerun()
-
+                    st.session_state.read_idx = end; st.session_state.quiz_data = None; st.rerun()
             with col_tools:
                 st.write("#### 🧠 Quick Quiz")
-                if st.button("Generate Quiz for these slides", type="primary"):
-                     with st.spinner("AI thinking..."):
-                        st.session_state.quiz_data = generate_interactive_quiz(current_images)
-                
+                if st.button("Generate Quiz", type="primary"):
+                     with st.spinner("AI thinking..."): st.session_state.quiz_data = generate_interactive_quiz(current_images)
                 if 'quiz_data' in st.session_state and st.session_state.quiz_data:
                     q_data = st.session_state.quiz_data
-                    if "error" in q_data[0]:
-                        st.error("AI Error")
+                    if "error" in q_data[0]: st.error("AI Error")
                     else:
                         for i, q in enumerate(q_data):
                             with st.expander(f"Q{i+1}: {q['question']}", expanded=True):
@@ -537,34 +418,22 @@ elif nav == "Active Learning":
                                 if st.button("Check", key=f"chk_{i}"):
                                     corr = q['options'][q['correct_index']]
                                     if ans == corr: st.success("Correct!")
-                                    else: st.error(f"Wrong. Answer: {corr}")
-                                    st.info(q['explanation'])
+                                    else: st.error(f"Wrong. Answer: {corr}"); st.info(q['explanation'])
 
-# ------------------------------------------
-# 4. EDITOR
-# ------------------------------------------
+# --- 4. EDITOR ---
 elif nav == "Editor":
     st.title("🛠️ Card Editor")
-    
     c.execute("SELECT id, name FROM exams")
     exams = c.fetchall()
     if exams:
         e_map = {name: id for id, name in exams}
         filter_exam = st.selectbox("Topic", list(e_map.keys()))
         eid = e_map[filter_exam]
-        
-        query = """
-            SELECT c.id, c.front, c.back 
-            FROM cards c 
-            JOIN lectures l ON c.lecture_id = l.id 
-            WHERE l.exam_id = %s
-        """
+        query = "SELECT c.id, c.front, c.back FROM cards c JOIN lectures l ON c.lecture_id = l.id WHERE l.exam_id = %s"
         df = pd.read_sql(query, conn, params=(eid,))
         edited = st.data_editor(df, num_rows="dynamic", key="editor", use_container_width=True)
-        
         if st.button("Save Changes", type="primary"):
             for i, row in edited.iterrows():
                 c.execute("UPDATE cards SET front=%s, back=%s WHERE id=%s", (row['front'], row['back'], int(row['id'])))
             conn.commit(); st.toast("Saved successfully!", icon="✅")
-    else:
-        st.info("No topics found.")
+    else: st.info("No topics found.")

@@ -201,15 +201,21 @@ def open_lecture_callback(lid):
     st.session_state.main_nav = "Active Learning"
 
 # ------------------------------------------
-# 1. REVIEW DASHBOARD (v5.5 Statistics & Prep)
+# 1. REVIEW DASHBOARD (v5.6 Smart Recommendations)
 # ------------------------------------------
 if nav == "Review":
     st.title("🧠 Study Center")
     today = date.today()
 
-    # 1. DATABASE FETCH FOR PREP SCREEN
+    # 1. INITIALIZE SESSION STATS
+    if 'session_active' not in st.session_state:
+        st.session_state.session_active = False
+    if 'trouble_lectures' not in st.session_state:
+        st.session_state.trouble_lectures = {} # lid: [count, exam_id]
+
+    # 2. DATABASE FETCH
     c.execute("""
-        SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.exam_id, e.exam_date, e.name
+        SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.id, l.name, e.exam_date, e.name, e.id
         FROM cards c 
         JOIN lectures l ON c.lecture_id = l.id 
         JOIN exams e ON l.exam_id = e.id
@@ -218,68 +224,62 @@ if nav == "Review":
     """, (today,))
     cards_due = c.fetchall()
 
-    # 2. SESSION STATE LOGIC
-    if 'session_active' not in st.session_state:
-        st.session_state.session_active = False
-
-    # --- PREP SCREEN (Statistics & Exam Date) ---
+    # --- PREP SCREEN ---
     if not st.session_state.session_active:
         if not cards_due:
             st.balloons()
             st.success("🎉 All caught up for today!")
         else:
-            # Stats Calculations
             total_due = len(cards_due)
             c.execute("SELECT name, exam_date FROM exams WHERE exam_date >= %s ORDER BY exam_date ASC LIMIT 1", (today,))
             next_ex = c.fetchone()
             
-            # UI Layout
             st.markdown("### 📊 Session Overview")
             col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Cards Due", total_due)
+            with col1: st.metric("Cards Due", total_due)
             with col2:
                 if next_ex:
                     days_left = (next_ex[1] - today).days
                     st.metric("Next Exam", f"{days_left} Days", next_ex[0])
-                else:
-                    st.metric("Next Exam", "None Set")
+                else: st.metric("Next Exam", "None Set")
             with col3:
-                st.metric("Estimated Time", f"~{total_due * 12 // 60} min") # Initial est 12s/card
+                # Get historical avg speed if exists, else default 10s
+                avg_speed = 10 if 'global_avg_speed' not in st.session_state else st.session_state.global_avg_speed
+                st.metric("Estimated Time", f"~{int(total_due * avg_speed // 60)} min")
+
+            # SPEED HISTORY (Simple list of last session)
+            if 'last_session_speed' in st.session_state:
+                with st.expander("📈 Previous Session Stats"):
+                    st.write(f"Average Speed: {st.session_state.last_session_speed:.1f}s / card")
 
             st.markdown("---")
             if st.button("🚀 Start Review Session", type="primary", use_container_width=True):
                 st.session_state.session_active = True
                 st.session_state.idx = 0
                 st.session_state.total_seconds = 0
+                st.session_state.trouble_lectures = {}
                 st.session_state.session_start_time = time.time()
                 st.rerun()
 
-    # --- ACTIVE STUDY SESSION ---
+    # --- ACTIVE SESSION ---
     else:
-        if 'idx' not in st.session_state: st.session_state.idx = 0
         total_cards = len(cards_due)
-        
         if st.session_state.idx < total_cards:
-            # Timer Math
+            # Header with Speed Logic
             remaining = total_cards - st.session_state.idx
             if st.session_state.idx > 0:
                 avg_speed = st.session_state.total_seconds / st.session_state.idx
-                est_seconds = avg_speed * remaining
-                time_display = f"⏱️ {int(est_seconds//60)}m {int(est_seconds%60)}s left"
-            else:
-                time_display = "⏱️ Calculating speed..."
+                time_display = f"⏱️ {int((avg_speed * remaining)//60)}m {int((avg_speed * remaining)%60)}s left"
+            else: time_display = "⏱️ Calculating speed..."
 
-            # Header UI
             st.progress(st.session_state.idx / total_cards)
             c_left, c_right = st.columns(2)
             c_left.caption(f"Card {st.session_state.idx + 1} of {total_cards}")
             c_right.markdown(f"<p style='text-align:right; font-weight:bold;'>{time_display}</p>", unsafe_allow_html=True)
 
-            card = cards_due[st.session_state.idx]
-            cid, front, back, interval, ease, revs, eid, exam_date, exam_name = card
+            # Card Data
+            cid, front, back, interval, ease, revs, lid, lname, exam_date, exam_name, eid = cards_due[st.session_state.idx]
 
-            # START CARD TIMER
             if 'card_load_time' not in st.session_state or not st.session_state.show:
                 st.session_state.card_load_time = time.time()
 
@@ -289,26 +289,29 @@ if nav == "Review":
                 st.markdown(f'<div class="flashcard flashcard-back"><small>ANSWER</small><br>{back}</div>', unsafe_allow_html=True)
                 
                 def answer(quality):
-                    # Record reaction time for stats
+                    # Track Trouble Lectures for Smart Recommendation
+                    if quality in [0, 3]: # Again or Hard
+                        if lid not in st.session_state.trouble_lectures:
+                            st.session_state.trouble_lectures[lid] = {"count": 1, "name": lname, "exam_date": exam_date}
+                        else:
+                            st.session_state.trouble_lectures[lid]["count"] += 1
+
+                    # Algorithm & DB Update
                     st.session_state.total_seconds += (time.time() - st.session_state.card_load_time)
-                    
-                    # SM-2 Logic
                     new_ease, new_interval = ease, interval
                     if quality == 0: new_interval, new_ease = 1, max(1.3, ease - 0.2)
                     elif quality == 3: new_interval, new_ease = max(1, int(interval * 1.2)), max(1.3, ease - 0.15)
                     elif quality == 4: new_interval = max(1, int(interval * ease))
                     elif quality == 5: new_interval, new_ease = max(1, int(interval * ease * 1.3)), min(3.0, ease + 0.15)
                     
-                    # Exam Cap
-                    if exam_date:
-                        days_until = (exam_date - today).days
-                        if days_until > 0 and new_interval >= days_until: new_interval = max(1, days_until - 1)
+                    if exam_date and (exam_date - today).days > 0:
+                        days_limit = (exam_date - today).days
+                        if new_interval >= days_limit: new_interval = max(1, days_limit - 1)
                     
                     c.execute("UPDATE cards SET next_review=%s, interval=%s, ease=%s, review_count=%s WHERE id=%s", 
                              (today + timedelta(days=new_interval), new_interval, new_ease, revs + 1, cid))
                     conn.commit()
-                    st.session_state.show = False
-                    st.session_state.idx += 1
+                    st.session_state.show, st.session_state.idx = False, st.session_state.idx + 1
                     st.rerun()
 
                 c1, c2, c3, c4 = st.columns(4)
@@ -318,18 +321,39 @@ if nav == "Review":
                 if c4.button("🚀 Easy", use_container_width=True): answer(5)
             else:
                 if st.button("Show Answer", type="primary", use_container_width=True):
-                    st.session_state.show = True
-                    st.rerun()
-            
-            if st.sidebar.button("⏹️ End Session Early"):
-                st.session_state.session_active = False
-                st.rerun()
+                    st.session_state.show = True; st.rerun()
+        
         else:
-            # Summary Screen
-            total_time = time.time() - st.session_state.session_start_time
+            # --- SUMMARY & SMART RECOMMENDATIONS ---
             st.balloons()
-            st.success(f"Session Complete in {int(total_time//60)}m {int(total_time%60)}s!")
-            if st.button("Back to Prep Room"):
+            total_time = time.time() - st.session_state.session_start_time
+            avg_final = st.session_state.total_seconds / total_cards
+            st.session_state.global_avg_speed = avg_final
+            st.session_state.last_session_speed = avg_final
+
+            st.success(f"Session Finished! Total time: {int(total_time//60)}m {int(total_time%60)}s")
+            
+            # Recommendation Logic
+            if st.session_state.trouble_lectures:
+                # Filter for exams within next 14 days
+                urgent = [v for k, v in st.session_state.trouble_lectures.items() 
+                          if v['exam_date'] and (v['exam_date'] - today).days <= 14]
+                
+                if urgent:
+                    # Sort by highest miss count
+                    top_trouble = sorted(urgent, key=lambda x: x['count'], reverse=True)[0]
+                    st.warning(f"💊 **Study Recommendation:** You struggled with **{top_trouble['count']} cards** from '{top_trouble['name']}'.")
+                    st.write(f"Since your exam is on {top_trouble['exam_date']}, you should review this lecture now.")
+                    
+                    # This button uses the callback we already built for the Library!
+                    if st.button(f"📖 Deep Dive: {top_trouble['name']}", type="primary"):
+                        # Find the ID for the top trouble lecture
+                        for lid, data in st.session_state.trouble_lectures.items():
+                            if data['name'] == top_trouble['name']:
+                                open_lecture_callback(lid)
+                                st.rerun()
+
+            if st.button("Finish & Back to Prep Room"):
                 st.session_state.session_active = False
                 st.rerun()
 

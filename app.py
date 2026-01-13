@@ -156,67 +156,155 @@ def open_lecture_callback(lid):
     st.session_state.main_nav = "👨‍🏫 Active Learning"
 
 # ------------------------------------------
-# 1. STUDY DASHBOARD
+# 1. STUDY DASHBOARD (ALGORITHM UPGRADE v4.0)
 # ------------------------------------------
 if menu == "Study Dashboard":
     st.header("🧠 Daily Review")
     today = date.today()
-    crisis_date = today + timedelta(days=4)
     
-    c.execute("SELECT name FROM exams WHERE exam_date IS NOT NULL AND exam_date BETWEEN %s AND %s", 
-              (today, crisis_date))
-    upcoming = c.fetchall()
+    # 1. PREPARE THE QUEUE
+    # We prioritize cards with specific exam dates approaching
+    upcoming_exams = c.execute("""
+        SELECT e.id, e.exam_date, e.name 
+        FROM exams e 
+        WHERE e.exam_date >= %s 
+        ORDER BY e.exam_date ASC
+    """, (today,)).fetchall()
     
-    if upcoming:
-        st.error(f"🚨 CRISIS MODE: {len(upcoming)} Exams Incoming!")
-        QUERY = """SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count 
-                   FROM cards c JOIN lectures l ON c.lecture_id = l.id 
-                   JOIN exams e ON l.exam_id = e.id 
-                   WHERE e.exam_date BETWEEN %s AND %s ORDER BY random() LIMIT 50"""
-        params = (today, crisis_date)
+    # Check for "Crisis Mode" (Exams within 4 days)
+    crisis_mode = False
+    crisis_exam_ids = []
+    if upcoming_exams:
+        for eid, edate, ename in upcoming_exams:
+            days_until = (edate - today).days
+            if days_until <= 4:
+                crisis_mode = True
+                crisis_exam_ids.append(eid)
+                st.error(f"🚨 CRISIS: {ename} is in {days_until} days!")
+
+    # 2. SELECT CARDS
+    # If crisis, pull ALL cards for that exam regardless of due date (Cram mode)
+    if crisis_mode and crisis_exam_ids:
+        placeholders = ",".join(["%s"] * len(crisis_exam_ids))
+        QUERY = f"""
+            SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.exam_id, e.exam_date
+            FROM cards c 
+            JOIN lectures l ON c.lecture_id = l.id 
+            JOIN exams e ON l.exam_id = e.id
+            WHERE e.id IN ({placeholders})
+            ORDER BY random() LIMIT 50
+        """
+        params = tuple(crisis_exam_ids)
     else:
+        # Standard Mode: Only due cards
         st.success("🟢 Standard Schedule")
-        QUERY = "SELECT id, front, back, interval, ease, review_count FROM cards WHERE next_review <= %s LIMIT 50"
+        QUERY = """
+            SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.exam_id, e.exam_date
+            FROM cards c 
+            JOIN lectures l ON c.lecture_id = l.id 
+            JOIN exams e ON l.exam_id = e.id
+            WHERE c.next_review <= %s 
+            ORDER BY c.next_review ASC LIMIT 50
+        """
         params = (today,)
     
     c.execute(QUERY, params)
     cards_due = c.fetchall()
     
+    # 3. STUDY INTERFACE
     if not cards_due:
-        st.info("🎉 No cards due!")
+        st.info("🎉 No cards due! Go touch some grass.")
     else:
         if 'idx' not in st.session_state: st.session_state.idx = 0
         if 'show' not in st.session_state: st.session_state.show = False
         
+        # Progress Bar
+        st.progress(min((st.session_state.idx) / len(cards_due), 1.0))
+        st.caption(f"Card {st.session_state.idx + 1} of {len(cards_due)}")
+
         if st.session_state.idx < len(cards_due):
             card = cards_due[st.session_state.idx]
-            cid, front, back, interval, ease, revs = card
+            cid, front, back, interval, ease, revs, eid, exam_date = card
             
-            st.progress((st.session_state.idx + 1) / len(cards_due))
-            st.markdown(f"""<div style="padding:20px;border:1px solid #ccc;border-radius:10px;background:#f9f9f9; color:#000000;">
-                        <h3 style="margin:0; color:#000000;">{front}</h3></div>""", unsafe_allow_html=True)
-            
-            if st.session_state.show:
-                st.markdown(f"""<div style="padding:20px;margin-top:10px;border:1px solid #a8d5e2;border-radius:10px;background:#e3f2fd; color:#000000;">
-                            <h4 style="margin:0; color:#000000;">{back}</h4></div>""", unsafe_allow_html=True)
-                
-                c1, c2, c3 = st.columns(3)
-                def answer(q):
-                    qual = 0 if q=='f' else 3 if q=='p' else 5
-                    n_int = 1 if q=='f' else int(interval*ease)
-                    n_ease = ease if q=='f' else max(1.3, ease+(0.1-(5-qual)*(0.08+(5-qual)*0.02)))
-                    c.execute("UPDATE cards SET next_review=%s, interval=%s, ease=%s, review_count=%s WHERE id=%s",
-                              (today+timedelta(days=n_int), n_int, n_ease, revs+1, cid))
-                    conn.commit()
-                    st.session_state.show=False; st.session_state.idx+=1; st.rerun()
-                if c1.button("❌ Fail"): answer('f')
-                if c2.button("😐 Pass"): answer('p')
-                if c3.button("✅ Easy"): answer('e')
-            else:
-                if st.button("Show Answer"): st.session_state.show=True; st.rerun()
-        else:
-            st.success("Session Done!"); st.session_state.idx=0
+            # LEECH WARNING
+            if revs > 6 and interval < 2:
+                st.warning("⚠️ LEECH: You have failed this card many times. Consider rewriting it.")
 
+            # Front Card
+            st.markdown(f"""
+            <div style="padding:20px;border:1px solid #ccc;border-radius:10px;background:#ffffff; color:#000000; font-size:18px;">
+                <strong>Q:</strong> {front}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Back Card (Revealed)
+            if st.session_state.show:
+                st.markdown(f"""
+                <div style="padding:20px;margin-top:10px;border:1px solid #a8d5e2;border-radius:10px;background:#f0f8ff; color:#000000; font-size:18px;">
+                    <strong>A:</strong> {back}
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # --- ALGORITHM CORE ---
+                def answer(quality):
+                    # SM-2++ LOGIC
+                    new_ease = ease
+                    new_interval = interval
+                    
+                    if quality == 0: # FAIL
+                        new_interval = 1
+                        new_ease = max(1.3, ease - 0.2) # Penalty
+                    
+                    elif quality == 3: # HARD (Pass but difficult)
+                        new_interval = max(1, int(interval * 1.2)) # Slow growth
+                        new_ease = max(1.3, ease - 0.15) # Slight penalty
+                        
+                    elif quality == 4: # GOOD (Standard)
+                        new_interval = max(1, int(interval * ease))
+                        # Ease stays same
+                        
+                    elif quality == 5: # EASY (Bonus)
+                        new_interval = max(1, int(interval * ease * 1.3)) # Bonus multiplier
+                        new_ease = min(3.0, ease + 0.15) # Boost ease
+
+                    # --- EXAM CAP LOGIC (The Pharmacy Special) ---
+                    if exam_date:
+                        days_until_exam = (exam_date - today).days
+                        # If the new interval pushes past the exam, cap it
+                        if days_until_exam > 0 and new_interval >= days_until_exam:
+                            new_interval = max(1, days_until_exam - 1) # Show day before exam
+                    
+                    # UPDATE DB
+                    c.execute("""
+                        UPDATE cards 
+                        SET next_review=%s, interval=%s, ease=%s, review_count=%s 
+                        WHERE id=%s
+                    """, (today + timedelta(days=new_interval), new_interval, new_ease, revs + 1, cid))
+                    conn.commit()
+                    
+                    # Next Card
+                    st.session_state.show = False
+                    st.session_state.idx += 1
+                    st.rerun()
+
+                # Buttons
+                c1, c2, c3, c4 = st.columns(4)
+                if c1.button("❌ Again (1d)", use_container_width=True): answer(0)
+                if c2.button("😓 Hard", use_container_width=True): answer(3)
+                if c3.button("✅ Good", use_container_width=True): answer(4)
+                if c4.button("🚀 Easy", use_container_width=True): answer(5)
+            
+            else:
+                if st.button("Show Answer", type="primary", use_container_width=True): 
+                    st.session_state.show = True
+                    st.rerun()
+        else:
+            st.balloons()
+            st.success("🎉 You are done for the day!")
+            if st.button("Start Over"):
+                st.session_state.idx = 0
+                st.rerun()
+                
 # ------------------------------------------
 # 2. LIBRARY (FOLDERS)
 # ------------------------------------------

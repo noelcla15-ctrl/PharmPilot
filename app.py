@@ -150,7 +150,7 @@ except Exception as e:
     st.error(f"Database Connection Failed: {e}")
     st.stop()
 
-# Helper function for callbacks
+# CALLBACKS
 def open_lecture_callback(lid):
     st.session_state.active_lecture_id = lid
     st.session_state.main_nav = "👨‍🏫 Active Learning"
@@ -345,17 +345,64 @@ elif menu == "📂 Library (Folders)":
                 c.execute("SELECT id, name, slide_count FROM lectures WHERE exam_id=%s", (exam_id,))
                 lectures = c.fetchall()
                 if not lectures: st.caption("&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (No lectures)")
+                
+                # REGENERATION OBJECTIVES (Generic)
+                default_objs = "Exam relevant facts. MOA, Dosing, Interactions."
+                
                 for lid, lname, lcount in lectures:
-                    # OPEN BUTTON WITH CALLBACK FIX
-                    col_txt, col_btn = st.columns([0.8, 0.2])
+                    # THREE COLUMNS: INFO | OPEN | RETRY
+                    col_txt, col_open, col_retry = st.columns([0.6, 0.2, 0.2])
+                    
                     with col_txt:
                         st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;📄 {lname} *({lcount} slides)*")
-                    with col_btn:
-                        # Use callback instead of direct state modification
+                    
+                    with col_open:
                         st.button("📖 Open", 
                                  key=f"open_{lid}", 
                                  on_click=open_lecture_callback, 
                                  args=(lid,))
+                    
+                    with col_retry:
+                        # NEW: Retry Button
+                        if st.button("⚡ AI", key=f"retry_{lid}", help="Regenerate cards"):
+                            lec_path = os.path.join(SLIDE_DIR, str(lid))
+                            if os.path.exists(lec_path):
+                                slides = sorted([f for f in os.listdir(lec_path) if f.endswith(".png")], 
+                                                key=lambda x: int(x.split('_')[1].split('.')[0]))
+                                
+                                images = [PIL.Image.open(os.path.join(lec_path, s)) for s in slides]
+                                
+                                st.toast(f"Regenerating {len(images)} slides...", icon="⚡")
+                                log = st.container()
+                                progress = st.progress(0)
+                                BATCH_SIZE = 10
+                                
+                                for i in range(0, len(images), BATCH_SIZE):
+                                    batch = images[i : i + BATCH_SIZE]
+                                    new_cards, error_msg = generate_cards_batch_json(batch, default_objs, i)
+                                    
+                                    if new_cards:
+                                        for f, b in new_cards:
+                                            c.execute("INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)", 
+                                                      (lid, f, b, today))
+                                        conn.commit()
+                                        with log: 
+                                            st.caption(f"✅ Batch {i//BATCH_SIZE + 1}: +{len(new_cards)} cards")
+                                    else:
+                                        if error_msg:
+                                            with log:
+                                                st.caption(f"⚠️ Batch Error: {error_msg}")
+                                        else:
+                                            with log:
+                                                st.caption(f"⏺️ Batch {i//BATCH_SIZE + 1}: No cards")
+                                    
+                                    progress.progress(min((i + BATCH_SIZE) / len(images), 1.0))
+                                
+                                st.success("Done! Refreshing...")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("No saved slides found. Delete and re-upload.")
 
 # ------------------------------------------
 # 3. ACTIVE LEARNING

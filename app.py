@@ -156,20 +156,21 @@ def open_lecture_callback(lid):
     st.session_state.main_nav = "👨‍🏫 Active Learning"
 
 # ------------------------------------------
-# 1. STUDY DASHBOARD (ALGORITHM UPGRADE v4.0)
+# 1. STUDY DASHBOARD (ALGORITHM UPGRADE v4.1)
 # ------------------------------------------
 if menu == "Study Dashboard":
     st.header("🧠 Daily Review")
     today = date.today()
     
     # 1. PREPARE THE QUEUE
-    # We prioritize cards with specific exam dates approaching
-    upcoming_exams = c.execute("""
+    # FIXED: Split execute() and fetchall() into two lines for Postgres
+    c.execute("""
         SELECT e.id, e.exam_date, e.name 
         FROM exams e 
         WHERE e.exam_date >= %s 
         ORDER BY e.exam_date ASC
-    """, (today,)).fetchall()
+    """, (today,))
+    upcoming_exams = c.fetchall()
     
     # Check for "Crisis Mode" (Exams within 4 days)
     crisis_mode = False
@@ -185,6 +186,7 @@ if menu == "Study Dashboard":
     # 2. SELECT CARDS
     # If crisis, pull ALL cards for that exam regardless of due date (Cram mode)
     if crisis_mode and crisis_exam_ids:
+        # Create dynamic placeholders based on number of exams (e.g., %s, %s)
         placeholders = ",".join(["%s"] * len(crisis_exam_ids))
         QUERY = f"""
             SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.exam_id, e.exam_date
@@ -619,3 +621,4 @@ elif menu == "Card Manager":
         st.info("No cards found.")
 
 conn.close()
+

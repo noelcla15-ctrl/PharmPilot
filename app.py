@@ -12,53 +12,78 @@ import stat
 import json
 
 # ==========================================
-# ⚙️ CONFIGURATION & HIGH CONTRAST CSS
+# ⚙️ CONFIGURATION & TOTAL COLOR CONTROL CSS
 # ==========================================
 st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="centered")
 
 st.markdown("""
 <style>
-    /* --- 1. FORCE TEXT COLOR (The Fix) --- */
-    /* This forces all standard text to be dark gray, overriding Dark Mode defaults */
-    .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, span, div {
-        color: #31333F !important;
-    }
-    
-    /* --- 2. BACKGROUNDS --- */
+    /* --- 1. FORCE LIGHT THEME BACKGROUNDS --- */
+    /* Main Area Background */
     .stApp {
-        background-color: #f8f9fa; /* Light Gray Background */
+        background-color: #FFFFFF;
     }
     
-    /* --- 3. COMPONENT FIXES --- */
-    /* Fix Expanders to be white with dark text */
-    div[data-testid="stExpander"] {
-        border: none;
-        box-shadow: 0px 1px 3px rgba(0,0,0,0.08);
-        background-color: white !important;
-        border-radius: 8px;
-        margin-bottom: 10px;
+    /* Sidebar Background (Force White) */
+    [data-testid="stSidebar"] {
+        background-color: #F0F2F6;
+        border-right: 1px solid #E6E6E6;
     }
     
-    /* Fix Flashcards */
+    /* --- 2. FORCE TEXT COLORS (The "Visible" Fix) --- */
+    /* Force ALL text in the main area AND sidebar to be Dark Gray */
+    .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, span, div, label {
+        color: #000000 !important;
+    }
+    
+    /* Fix Input Fields (Text Boxes, Selects) so typing is visible */
+    input, textarea, select {
+        color: #000000 !important;
+        background-color: #FFFFFF !important;
+    }
+    
+    /* Fix Dropdown Menus (Selectbox) */
+    div[data-baseweb="select"] > div {
+        background-color: #FFFFFF !important;
+        color: #000000 !important;
+    }
+    
+    /* --- 3. CUSTOM COMPONENT STYLING --- */
+    /* Flashcard Style */
     .flashcard {
         background-color: white;
         padding: 40px;
         border-radius: 15px;
         box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        border: 1px solid #E0E0E0;
         border-left: 6px solid #4F8BF9;
         font-size: 20px;
         margin-bottom: 20px;
-        color: #31333F !important;
+        color: #000000 !important;
     }
     
     .flashcard-back {
         background-color: #eef6ff;
         border-left: 6px solid #00c853;
-        color: #31333F !important;
+        color: #000000 !important;
+    }
+    
+    /* Clean Expanders (White background, gray border) */
+    div[data-testid="stExpander"] {
+        background-color: #FFFFFF !important;
+        border: 1px solid #E0E0E0;
+        border-radius: 8px;
+        margin-bottom: 10px;
+    }
+    
+    /* Radio Buttons in Sidebar */
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+        font-size: 16px;
+        font-weight: 500;
     }
     
     /* --- 4. BUTTON EXCEPTION --- */
-    /* We must allow buttons to keep their own text colors (so white text on black buttons stays white) */
+    /* Allow buttons to keep their own text colors (so white text on blue/red buttons stays white) */
     button p {
         color: inherit !important;
     }
@@ -66,12 +91,13 @@ st.markdown("""
         color: inherit !important;
     }
     
-    /* Button Styling */
+    /* Make buttons pop */
     .stButton>button {
         border-radius: 8px;
         height: 3em;
         font-weight: 600;
         border: none;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         transition: transform 0.1s;
     }
     .stButton>button:active {
@@ -354,7 +380,7 @@ elif nav == "Library":
                                                             key=lambda x: int(x.split('_')[1].split('.')[0]))
                                             images = [PIL.Image.open(os.path.join(lec_path, s)) for s in slides]
                                             st.toast(f"Processing {len(images)} slides...", icon="⚡")
-                                            # SAFE LOOP (Syntax Fixed)
+                                            # SAFE LOOP
                                             for i in range(0, len(images), 10):
                                                 batch = images[i : i + 10]
                                                 new_cards, _ = generate_cards_batch_json(batch, "Review", i)

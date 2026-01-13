@@ -150,6 +150,11 @@ except Exception as e:
     st.error(f"Database Connection Failed: {e}")
     st.stop()
 
+# Helper function for callbacks
+def open_lecture_callback(lid):
+    st.session_state.active_lecture_id = lid
+    st.session_state.main_nav = "👨‍🏫 Active Learning"
+
 # ------------------------------------------
 # 1. STUDY DASHBOARD
 # ------------------------------------------
@@ -341,14 +346,16 @@ elif menu == "📂 Library (Folders)":
                 lectures = c.fetchall()
                 if not lectures: st.caption("&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (No lectures)")
                 for lid, lname, lcount in lectures:
+                    # OPEN BUTTON WITH CALLBACK FIX
                     col_txt, col_btn = st.columns([0.8, 0.2])
                     with col_txt:
                         st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;📄 {lname} *({lcount} slides)*")
                     with col_btn:
-                        if st.button("📖 Open", key=f"open_{lid}"):
-                            st.session_state.active_lecture_id = lid
-                            st.session_state.main_nav = "👨‍🏫 Active Learning"
-                            st.rerun()
+                        # Use callback instead of direct state modification
+                        st.button("📖 Open", 
+                                 key=f"open_{lid}", 
+                                 on_click=open_lecture_callback, 
+                                 args=(lid,))
 
 # ------------------------------------------
 # 3. ACTIVE LEARNING

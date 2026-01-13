@@ -12,19 +12,34 @@ import stat
 import json
 
 # ==========================================
-# ⚙️ CONFIGURATION & CUSTOM CSS
+# ⚙️ CONFIGURATION & HIGH CONTRAST CSS
 # ==========================================
 st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="centered")
 
-# 🎨 CUSTOM UI STYLING
 st.markdown("""
 <style>
-    /* Main Background */
-    .stApp {
-        background-color: #f8f9fa;
+    /* --- 1. FORCE TEXT COLOR (The Fix) --- */
+    /* This forces all standard text to be dark gray, overriding Dark Mode defaults */
+    .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, span, div {
+        color: #31333F !important;
     }
     
-    /* Flashcard Style */
+    /* --- 2. BACKGROUNDS --- */
+    .stApp {
+        background-color: #f8f9fa; /* Light Gray Background */
+    }
+    
+    /* --- 3. COMPONENT FIXES --- */
+    /* Fix Expanders to be white with dark text */
+    div[data-testid="stExpander"] {
+        border: none;
+        box-shadow: 0px 1px 3px rgba(0,0,0,0.08);
+        background-color: white !important;
+        border-radius: 8px;
+        margin-bottom: 10px;
+    }
+    
+    /* Fix Flashcards */
     .flashcard {
         background-color: white;
         padding: 40px;
@@ -33,13 +48,22 @@ st.markdown("""
         border-left: 6px solid #4F8BF9;
         font-size: 20px;
         margin-bottom: 20px;
-        color: #1f1f1f;
+        color: #31333F !important;
     }
     
     .flashcard-back {
         background-color: #eef6ff;
         border-left: 6px solid #00c853;
-        color: #1f1f1f;
+        color: #31333F !important;
+    }
+    
+    /* --- 4. BUTTON EXCEPTION --- */
+    /* We must allow buttons to keep their own text colors (so white text on black buttons stays white) */
+    button p {
+        color: inherit !important;
+    }
+    button div {
+        color: inherit !important;
     }
     
     /* Button Styling */
@@ -52,15 +76,6 @@ st.markdown("""
     }
     .stButton>button:active {
         transform: scale(0.98);
-    }
-    
-    /* Clean Expanders */
-    div[data-testid="stExpander"] {
-        border: none;
-        box-shadow: 0px 1px 3px rgba(0,0,0,0.08);
-        background: white;
-        border-radius: 8px;
-        margin-bottom: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -190,28 +205,22 @@ st.sidebar.markdown("---")
 if 'main_nav' not in st.session_state:
     st.session_state.main_nav = "Review"
 
-# Clean Sidebar Menu
 nav = st.sidebar.radio("Menu", 
     ["Review", "Library", "Active Learning", "Editor"],
     key="main_nav"
 )
 
-# Callbacks
 def open_lecture_callback(lid):
     st.session_state.active_lecture_id = lid
     st.session_state.main_nav = "Active Learning"
 
 # ------------------------------------------
-# 1. REVIEW DASHBOARD (Optimized UI)
+# 1. REVIEW DASHBOARD
 # ------------------------------------------
 if nav == "Review":
     st.title("🧠 Daily Review")
     
     today = date.today()
-    c.execute("SELECT id FROM exams WHERE exam_date >= %s ORDER BY exam_date ASC LIMIT 1", (today,))
-    next_exam = c.fetchone()
-    
-    # Logic to fetch cards
     c.execute("""
         SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.exam_id, e.exam_date
         FROM cards c 
@@ -231,7 +240,6 @@ if nav == "Review":
         if 'idx' not in st.session_state: st.session_state.idx = 0
         if 'show' not in st.session_state: st.session_state.show = False
         
-        # Progress Bar
         progress = min((st.session_state.idx) / len(cards_due), 1.0)
         st.progress(progress)
         
@@ -239,7 +247,6 @@ if nav == "Review":
             card = cards_due[st.session_state.idx]
             cid, front, back, interval, ease, revs, eid, exam_date = card
             
-            # LEECH WARNING
             if revs > 6 and interval < 2:
                 st.warning("⚠️ Difficult Card (Leech)")
 
@@ -260,20 +267,19 @@ if nav == "Review":
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # ALGORITHM
                 def answer(quality):
                     new_ease = ease
                     new_interval = interval
                     
-                    if quality == 0: # FAIL
+                    if quality == 0: 
                         new_interval = 1
                         new_ease = max(1.3, ease - 0.2)
-                    elif quality == 3: # HARD
+                    elif quality == 3: 
                         new_interval = max(1, int(interval * 1.2))
                         new_ease = max(1.3, ease - 0.15)
-                    elif quality == 4: # GOOD
+                    elif quality == 4: 
                         new_interval = max(1, int(interval * ease))
-                    elif quality == 5: # EASY
+                    elif quality == 5: 
                         new_interval = max(1, int(interval * ease * 1.3))
                         new_ease = min(3.0, ease + 0.15)
 
@@ -289,7 +295,6 @@ if nav == "Review":
                     st.session_state.idx += 1
                     st.rerun()
 
-                # ACTION BUTTONS
                 c1, c2, c3, c4 = st.columns(4)
                 if c1.button("❌ Fail", use_container_width=True): answer(0)
                 if c2.button("😓 Hard", use_container_width=True): answer(3)
@@ -307,14 +312,13 @@ if nav == "Review":
                 st.rerun()
 
 # ------------------------------------------
-# 2. LIBRARY (Tabs UI)
+# 2. LIBRARY
 # ------------------------------------------
 elif nav == "Library":
     st.title("📂 Library")
     
     tab_browse, tab_upload, tab_manage = st.tabs(["📚 Browse Materials", "☁️ Upload New", "⚙️ Manage"])
     
-    # TAB 1: BROWSE
     with tab_browse:
         big_query = """
             SELECT c.name as class_name, e.name as exam_name, e.id as exam_id,
@@ -350,6 +354,7 @@ elif nav == "Library":
                                                             key=lambda x: int(x.split('_')[1].split('.')[0]))
                                             images = [PIL.Image.open(os.path.join(lec_path, s)) for s in slides]
                                             st.toast(f"Processing {len(images)} slides...", icon="⚡")
+                                            # SAFE LOOP (Syntax Fixed)
                                             for i in range(0, len(images), 10):
                                                 batch = images[i : i + 10]
                                                 new_cards, _ = generate_cards_batch_json(batch, "Review", i)
@@ -360,7 +365,6 @@ elif nav == "Library":
                                             st.rerun()
                         st.divider()
 
-    # TAB 2: UPLOAD
     with tab_upload:
         c.execute("SELECT id, name FROM classes")
         classes = c.fetchall()
@@ -374,7 +378,6 @@ elif nav == "Library":
             c.execute("SELECT id, name FROM exams WHERE class_id=%s", (c_map[sel_c],))
             exams = c.fetchall()
             
-            # QUICK ADD EXAM
             with st.expander("➕ Add New Topic to this Class"):
                 new_topic = st.text_input("Topic Name")
                 d_val = st.date_input("Exam Date")
@@ -391,7 +394,6 @@ elif nav == "Library":
                 
                 if uploaded_files and st.button("🚀 Upload & Process", type="primary"):
                     status = st.status("Processing...", expanded=True)
-                    total = len(uploaded_files)
                     for idx, uploaded in enumerate(uploaded_files):
                         status.write(f"Reading {uploaded.name}...")
                         c.execute("INSERT INTO lectures (exam_id, name, slide_count) VALUES (%s,%s,%s) RETURNING id", 
@@ -416,7 +418,6 @@ elif nav == "Library":
                     time.sleep(1)
                     st.rerun()
 
-    # TAB 3: MANAGE
     with tab_manage:
         new_class = st.text_input("Create New Class Name")
         if st.button("Create Class"):
@@ -469,7 +470,6 @@ elif nav == "Active Learning":
             if 'read_idx' not in st.session_state: st.session_state.read_idx = 0
             start = st.session_state.read_idx
             
-            # UI: SPLIT VIEW
             col_slides, col_tools = st.columns([2, 1])
             
             with col_slides:
@@ -477,7 +477,6 @@ elif nav == "Active Learning":
                 st.caption(f"Slides {start+1}-{end} of {len(slides)}")
                 st.progress(end/len(slides))
                 
-                # Fetch images for quiz generation
                 current_images = []
                 for i in range(start, end):
                     img_path = os.path.join(lec_path, slides[i])

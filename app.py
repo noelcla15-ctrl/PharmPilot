@@ -160,8 +160,7 @@ def generate_cards_batch_json(images, objectives, start_idx):
     """
     try:
         response = flash_model.generate_content([prompt] + images)
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_text)
+        data = parse_json_response(response.text, "flashcards")
         valid_cards = []
         for item in data:
             if 'front' in item and 'back' in item:
@@ -180,16 +179,32 @@ def generate_interactive_quiz(images):
     try:
         content = [prompt] + images
         response = quiz_model.generate_content(content)
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_text)
+        return parse_json_response(response.text, "quiz")
     except Exception as e:
         return [{"error": str(e)}]
+
+def parse_json_response(response_text, payload_name):
+    clean_text = response_text.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(clean_text)
+    except json.JSONDecodeError:
+        start = clean_text.find("[")
+        end = clean_text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(clean_text[start:end + 1])
+        raise ValueError(f"Unable to parse {payload_name} JSON response.")
 
 # ==========================================
 # 🖥️ UI LOGIC
 # ==========================================
 if 'main_nav' not in st.session_state:
     st.session_state.main_nav = "Review"
+if 'show' not in st.session_state:
+    st.session_state.show = False
+if 'quiz_data' not in st.session_state:
+    st.session_state.quiz_data = None
+if 'read_idx' not in st.session_state:
+    st.session_state.read_idx = 0
 
 nav = st.sidebar.radio("Menu", 
     ["Review", "Library", "Active Learning", "Editor"],
@@ -391,7 +406,9 @@ elif nav == "Library":
                                             st.toast(f"Processing {len(images)} slides...", icon="⚡")
                                             for i in range(0, len(images), 10):
                                                 batch = images[i : i + 10]
-                                                new_cards, _ = generate_cards_batch_json(batch, "Review", i)
+                                                new_cards, error = generate_cards_batch_json(batch, "Review", i)
+                                                if error:
+                                                    st.error(f"AI flashcard error: {error}")
                                                 if new_cards:
                                                     for f, b in new_cards:
                                                         c.execute("INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)", (lid, f, b, date.today()))
@@ -412,8 +429,11 @@ elif nav == "Library":
                 new_topic = st.text_input("Topic Name")
                 d_val = st.date_input("Exam Date")
                 if st.button("Create Topic"):
-                    c.execute("INSERT INTO exams (class_id, name, exam_date) VALUES (%s,%s,%s)", (c_map[sel_c], new_topic, d_val))
-                    conn.commit(); st.rerun()
+                    if not new_topic.strip():
+                        st.warning("Topic name cannot be empty.")
+                    else:
+                        c.execute("INSERT INTO exams (class_id, name, exam_date) VALUES (%s,%s,%s)", (c_map[sel_c], new_topic.strip(), d_val))
+                        conn.commit(); st.rerun()
             if exams:
                 e_map = {n: i for i, n in exams}
                 sel_e = st.selectbox("Select Topic", list(e_map.keys()))
@@ -432,7 +452,9 @@ elif nav == "Library":
                         status.write("Generating Flashcards...")
                         for i in range(0, len(images), 10):
                             batch = images[i : i + 10]
-                            new_cards, _ = generate_cards_batch_json(batch, objs, i)
+                            new_cards, error = generate_cards_batch_json(batch, objs, i)
+                            if error:
+                                status.write(f"AI flashcard error: {error}")
                             if new_cards:
                                 for f, b in new_cards:
                                     c.execute("INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)", (lid, f, b, date.today()))
@@ -442,7 +464,12 @@ elif nav == "Library":
 
     with tab_manage:
         new_class = st.text_input("Create New Class Name")
-        if st.button("Create Class"): c.execute("INSERT INTO classes (name) VALUES (%s)", (new_class,)); conn.commit(); st.rerun()
+        if st.button("Create Class"):
+            if not new_class.strip():
+                st.warning("Class name cannot be empty.")
+            else:
+                c.execute("INSERT INTO classes (name) VALUES (%s)", (new_class.strip(),))
+                conn.commit(); st.rerun()
         st.write("---"); st.write("🗑️ **Danger Zone**")
         c.execute("SELECT id, name FROM exams")
         all_exams = c.fetchall()
@@ -491,7 +518,8 @@ elif nav == "Active Learning":
                      with st.spinner("AI thinking..."): st.session_state.quiz_data = generate_interactive_quiz(current_images)
                 if 'quiz_data' in st.session_state and st.session_state.quiz_data:
                     q_data = st.session_state.quiz_data
-                    if "error" in q_data[0]: st.error("AI Error")
+                    if "error" in q_data[0]:
+                        st.error(f"AI Error: {q_data[0]['error']}")
                     else:
                         for i, q in enumerate(q_data):
                             with st.expander(f"Q{i+1}: {q['question']}", expanded=True):

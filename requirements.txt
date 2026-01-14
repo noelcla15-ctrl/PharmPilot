@@ -1,6 +1,8 @@
 streamlit
-google-generativeai
 psycopg2-binary
+google-generativeai
+openai
 pymupdf
+pillow
 pandas
-Pillow
+requests

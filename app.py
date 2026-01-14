@@ -19,7 +19,6 @@ from openai import OpenAI
 # ✅ ENV DETECTION + PROVIDER ORDER
 # ==========================================
 def running_on_streamlit_cloud() -> bool:
-    # Streamlit Community Cloud is headless and typically sets these env vars
     return os.environ.get("STREAMLIT_CLOUD", "").lower() == "true" or bool(os.environ.get("STREAMLIT_SERVER_HEADLESS"))
 
 IS_CLOUD = running_on_streamlit_cloud()
@@ -86,21 +85,36 @@ try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     DB_URL = st.secrets["SUPABASE_DB_URL"]
 
+    # Supabase Storage (PDF-only)
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
+    SUPABASE_BUCKET = st.secrets.get("SUPABASE_STORAGE_BUCKET", "pharmpilot")
+    SUPABASE_PDF_PREFIX = st.secrets.get("SUPABASE_PDF_PREFIX", "lectures")  # folder inside bucket
+
     # OpenAI (fallback when Gemini fails)
     OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
     OPENAI_TEXT_MODEL = st.secrets.get("OPENAI_TEXT_MODEL", "gpt-4o-mini")
     OPENAI_VISION_MODEL = st.secrets.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
     openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-    # Local Ollama (optional local-first)
-    # IMPORTANT: force-disable on cloud deployments
+    # Local Ollama (optional local-first). Force-disable on cloud.
     OLLAMA_ENABLED = (not IS_CLOUD) and bool(st.secrets.get("OLLAMA_ENABLED", False))
     OLLAMA_URL = st.secrets.get("OLLAMA_URL", "http://127.0.0.1:11434")
     OLLAMA_TEXT_MODEL = st.secrets.get("OLLAMA_TEXT_MODEL", "qwen2.5:7b-instruct")
     OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "qwen2.5-vl:7b")
 
 except Exception:
-    st.error("Missing Secrets! Make sure Streamlit secrets are set (local: .streamlit/secrets.toml, cloud: app secrets).")
+    st.error(
+        "Missing Secrets! Ensure Streamlit secrets are set.\n\n"
+        "Required:\n"
+        "- GOOGLE_API_KEY\n"
+        "- SUPABASE_DB_URL\n"
+        "- SUPABASE_URL\n"
+        "- SUPABASE_ANON_KEY\n"
+        "Optional:\n"
+        "- SUPABASE_STORAGE_BUCKET (default: pharmpilot)\n"
+        "- SUPABASE_PDF_PREFIX (default: lectures)\n"
+    )
     st.stop()
 
 # Provider order: local uses Ollama first; cloud skips Ollama entirely
@@ -121,6 +135,7 @@ safety_settings = [
 flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
 quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
 
+# Local ephemeral cache dir (works locally; on cloud it's transient but OK)
 SLIDE_DIR = "lecture_slides"
 os.makedirs(SLIDE_DIR, exist_ok=True)
 
@@ -140,7 +155,6 @@ def get_cursor():
         if conn is None or conn.closed != 0:
             raise psycopg2.InterfaceError("Cached connection was closed")
 
-        # lightweight health check
         with conn.cursor() as test_cur:
             test_cur.execute("SELECT 1;")
 
@@ -154,8 +168,73 @@ def get_cursor():
         conn = get_db_connection()
         return conn, conn.cursor()
 
-# Always use these (instead of global conn/c created elsewhere)
 conn, c = get_cursor()
+
+# ==========================================
+# ✅ Supabase Storage (PDF-only) via REST
+# ==========================================
+def _supabase_storage_headers(content_type: str | None = None):
+    h = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    }
+    if content_type:
+        h["Content-Type"] = content_type
+    return h
+
+def supabase_pdf_object_path(lecture_id: int) -> str:
+    return f"{SUPABASE_PDF_PREFIX}/{lecture_id}.pdf"
+
+def upload_pdf_to_supabase(lecture_id: int, pdf_bytes: bytes) -> str:
+    """
+    Uploads lecture PDF to Supabase Storage bucket; overwrites if exists.
+    Returns the object path saved.
+    """
+    obj_path = supabase_pdf_object_path(lecture_id)
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{obj_path}"
+    r = requests.post(
+        url,
+        headers=_supabase_storage_headers("application/pdf"),
+        params={"upsert": "true"},
+        data=pdf_bytes,
+        timeout=60,
+    )
+    if not (200 <= r.status_code < 300):
+        raise RuntimeError(f"Supabase upload failed ({r.status_code}): {r.text}")
+    return obj_path
+
+def download_pdf_from_supabase(object_path: str) -> bytes:
+    """
+    Downloads lecture PDF bytes from Supabase Storage.
+    """
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{object_path}"
+    r = requests.get(url, headers=_supabase_storage_headers(), timeout=60)
+    if not (200 <= r.status_code < 300):
+        raise RuntimeError(f"Supabase download failed ({r.status_code}): {r.text}")
+    return r.content
+
+def ensure_lecture_has_pdf_path_column():
+    """
+    Adds lectures.pdf_path column if missing.
+    Safe to call on startup.
+    """
+    conn, c = get_cursor()
+    c.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name='lectures' AND column_name='pdf_path'
+        );
+        """
+    )
+    exists = c.fetchone()[0]
+    if not exists:
+        # minimal safe schema update
+        c.execute("ALTER TABLE lectures ADD COLUMN pdf_path TEXT;")
+        conn.commit()
+
+ensure_lecture_has_pdf_path_column()
 
 # ==========================================
 # 🧠 JSON PARSER (shared)
@@ -277,7 +356,11 @@ def extract_slide_texts_from_pdf_bytes(pdf_bytes: bytes):
         texts.append(txt)
     return texts
 
-def save_slides_locally_from_pdf_bytes(pdf_bytes: bytes, lecture_id):
+def save_slides_locally_from_pdf_bytes(pdf_bytes: bytes, lecture_id, dpi=250):
+    """
+    Renders slide PNGs locally (ephemeral cache).
+    Returns PIL images.
+    """
     slide_images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     lec_path = os.path.join(SLIDE_DIR, str(lecture_id))
@@ -295,7 +378,7 @@ def save_slides_locally_from_pdf_bytes(pdf_bytes: bytes, lecture_id):
     os.makedirs(lec_path, exist_ok=True)
 
     for i, page in enumerate(doc):
-        pix = page.get_pixmap(dpi=250)
+        pix = page.get_pixmap(dpi=dpi)
         img_path = os.path.join(lec_path, f"slide_{i}.png")
         pix.save(img_path)
         slide_images.append(PIL.Image.open(img_path))
@@ -376,6 +459,46 @@ Return items in the same order as the images.
 
     save_slide_cache(lecture_id, cache)
     return cache
+
+# ==========================================
+# ✅ Ensure local cache exists by downloading PDF from Supabase when needed
+# ==========================================
+def ensure_local_assets_for_lecture(lecture_id: int):
+    """
+    Ensures we have:
+    - local slide PNGs
+    - slide_cache.json
+    by downloading the lecture PDF from Supabase Storage when missing.
+    """
+    lec_path = os.path.join(SLIDE_DIR, str(lecture_id))
+    cache = load_slide_cache(lecture_id)
+
+    have_pngs = os.path.exists(lec_path) and any(
+        f.endswith(".png") and f.startswith("slide_") for f in os.listdir(lec_path)
+    )
+
+    if cache is not None and have_pngs:
+        return  # already good
+
+    # pull pdf_path from DB
+    conn, c = get_cursor()
+    c.execute("SELECT pdf_path FROM lectures WHERE id=%s", (lecture_id,))
+    row = c.fetchone()
+    pdf_path = row[0] if row else None
+    if not pdf_path:
+        raise RuntimeError("Lecture PDF not found in Supabase (missing lectures.pdf_path). Re-upload that lecture.")
+
+    pdf_bytes = download_pdf_from_supabase(pdf_path)
+
+    # (re)render slides locally and rebuild cache
+    images = save_slides_locally_from_pdf_bytes(pdf_bytes, lecture_id, dpi=250)
+    slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
+    build_slide_cache(lecture_id, slide_texts)
+
+    # objectives also stored locally; if missing, regenerate and save
+    if not load_objectives(lecture_id):
+        auto_objs = extract_objectives_from_slide_texts(slide_texts, max_slides=8)
+        save_objectives(lecture_id, auto_objs)
 
 # ==========================================
 # 🎯 OBJECTIVES (AUTO-EXTRACT + STORE)
@@ -570,7 +693,7 @@ HIGH-YIELD NOTES:
     return []
 
 # ==========================================
-# ☁️ GEMINI QUIZ (unchanged)
+# ☁️ GEMINI QUIZ
 # ==========================================
 def generate_interactive_quiz_gemini(images):
     prompt = """
@@ -735,8 +858,6 @@ def open_lecture_callback(lid):
 if nav == "Review":
     st.title("🧠 Study Center")
     today = date.today()
-
-    # refresh cursor each run (prevents "connection already closed" on reruns)
     conn, c = get_cursor()
 
     if "session_active" not in st.session_state:
@@ -906,8 +1027,6 @@ if nav == "Review":
 # ------------------------------------------
 elif nav == "Library":
     st.title("📂 Library")
-
-    # refresh cursor each run (prevents stale connection)
     conn, c = get_cursor()
 
     tab_browse, tab_upload, tab_manage = st.tabs(["📚 Browse Materials", "☁️ Upload New", "⚙️ Manage"])
@@ -940,38 +1059,43 @@ elif nav == "Library":
                                     st.button("Open", key=f"op_{lid}", on_click=open_lecture_callback, args=(lid,))
                                 with c3:
                                     if st.button("⚡ AI", key=f"rt_{lid}", help="Retry AI"):
+                                        # Ensure local assets by downloading PDF if needed
+                                        try:
+                                            ensure_local_assets_for_lecture(lid)
+                                        except Exception as e:
+                                            st.error(str(e))
+                                            st.stop()
+
                                         lec_path = os.path.join(SLIDE_DIR, str(lid))
-                                        if os.path.exists(lec_path):
-                                            slides = sorted(
-                                                [f for f in os.listdir(lec_path) if f.endswith(".png")],
-                                                key=lambda x: int(x.split("_")[1].split(".")[0]),
-                                            )
-                                            images = [PIL.Image.open(os.path.join(lec_path, s)) for s in slides]
+                                        slides = sorted(
+                                            [f for f in os.listdir(lec_path) if f.endswith(".png")],
+                                            key=lambda x: int(x.split("_")[1].split(".")[0]),
+                                        )
+                                        images = [PIL.Image.open(os.path.join(lec_path, s)) for s in slides]
 
-                                            cache = load_slide_cache(lid)
-                                            if not cache:
-                                                st.warning("Missing slide_cache.json. Re-upload lecture to rebuild cache.")
-                                                st.stop()
+                                        cache = load_slide_cache(lid)
+                                        if not cache:
+                                            st.error("slide_cache.json missing and could not be rebuilt.")
+                                            st.stop()
 
-                                            stored_obj = "\n".join(f"- {x}" for x in load_objectives(lid)) or ""
+                                        stored_obj = "\n".join(f"- {x}" for x in load_objectives(lid)) or ""
 
-                                            st.toast(f"Processing {len(images)} slides...", icon="⚡")
-                                            for i in range(0, len(images), 10):
-                                                batch_imgs = images[i:i+10]
-                                                batch_indices = list(range(i, min(i+10, len(images))))
-                                                new_cards, error = generate_cards_hybrid(lid, batch_indices, batch_imgs, cache, stored_obj, i)
-                                                if error:
-                                                    st.error(f"AI flashcard note: {error}")
-                                                if new_cards:
-                                                    # refresh cursor before inserts
-                                                    conn, c = get_cursor()
-                                                    for f, b in new_cards:
-                                                        c.execute(
-                                                            "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
-                                                            (lid, f, b, date.today()),
-                                                        )
-                                                    conn.commit()
-                                            st.rerun()
+                                        st.toast(f"Processing {len(images)} slides...", icon="⚡")
+                                        for i in range(0, len(images), 10):
+                                            batch_imgs = images[i:i+10]
+                                            batch_indices = list(range(i, min(i+10, len(images))))
+                                            new_cards, error = generate_cards_hybrid(lid, batch_indices, batch_imgs, cache, stored_obj, i)
+                                            if error:
+                                                st.error(f"AI flashcard note: {error}")
+                                            if new_cards:
+                                                conn, c = get_cursor()
+                                                for f, b in new_cards:
+                                                    c.execute(
+                                                        "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
+                                                        (lid, f, b, date.today()),
+                                                    )
+                                                conn.commit()
+                                        st.rerun()
                         st.divider()
 
     with tab_upload:
@@ -1012,23 +1136,38 @@ elif nav == "Library":
 
                     for uploaded in uploaded_files:
                         status.write(f"Reading {uploaded.name}...")
-
-                        # refresh cursor for each upload iteration
                         conn, c = get_cursor()
 
                         pdf_bytes = uploaded.getvalue()
 
+                        # Create lecture row first
                         c.execute(
-                            "INSERT INTO lectures (exam_id, name, slide_count) VALUES (%s,%s,%s) RETURNING id",
-                            (e_map[sel_e], uploaded.name, 0),
+                            "INSERT INTO lectures (exam_id, name, slide_count, pdf_path) VALUES (%s,%s,%s,%s) RETURNING id",
+                            (e_map[sel_e], uploaded.name, 0, None),
                         )
                         lid = c.fetchone()[0]
                         conn.commit()
 
-                        images = save_slides_locally_from_pdf_bytes(pdf_bytes, lid)
+                        # Upload PDF to Supabase Storage, then store pdf_path
+                        try:
+                            pdf_path = upload_pdf_to_supabase(lid, pdf_bytes)
+                        except Exception as e:
+                            # cleanup lecture row if upload failed
+                            conn, c = get_cursor()
+                            c.execute("DELETE FROM lectures WHERE id=%s", (lid,))
+                            conn.commit()
+                            raise
+
+                        conn, c = get_cursor()
+                        c.execute("UPDATE lectures SET pdf_path=%s WHERE id=%s", (pdf_path, lid))
+                        conn.commit()
+
+                        # Build ephemeral local slides/cache for processing now
+                        images = save_slides_locally_from_pdf_bytes(pdf_bytes, lid, dpi=250)
                         slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
                         cache = build_slide_cache(lid, slide_texts)
 
+                        # Objectives
                         if not (objs and objs.strip()):
                             status.write("Auto-extracting learning objectives...")
                             auto_objs = extract_objectives_from_slide_texts(slide_texts, max_slides=8)
@@ -1039,6 +1178,7 @@ elif nav == "Library":
                             save_objectives(lid, user_list)
                             objectives_input = objs
 
+                        conn, c = get_cursor()
                         c.execute("UPDATE lectures SET slide_count=%s WHERE id=%s", (len(images), lid))
                         conn.commit()
 
@@ -1086,10 +1226,16 @@ elif nav == "Library":
             del_target = st.selectbox("Select Topic to Delete", list(e_del_map.keys()))
             if st.button("Permanently Delete Topic"):
                 eid = e_del_map[del_target]
-                c.execute("SELECT id FROM lectures WHERE exam_id=%s", (eid,))
-                l_ids = c.fetchall()
-                for (lid,) in l_ids:
+                c.execute("SELECT id, pdf_path FROM lectures WHERE exam_id=%s", (eid,))
+                l_rows = c.fetchall()
+
+                # delete local cache folders
+                for (lid, _pdf_path) in l_rows:
                     shutil.rmtree(os.path.join(SLIDE_DIR, str(lid)), ignore_errors=True)
+
+                # NOTE: we are not deleting PDFs in storage here because that requires elevated permissions
+                # (service role). Keep it as-is or implement scheduled cleanup outside Streamlit.
+
                 c.execute("DELETE FROM exams WHERE id=%s", (eid,))
                 conn.commit()
                 st.rerun()
@@ -1099,8 +1245,6 @@ elif nav == "Library":
 # ------------------------------------------
 elif nav == "Active Learning":
     st.title("👨‍🏫 Active Learning")
-
-    # refresh cursor each run
     conn, c = get_cursor()
 
     c.execute("SELECT l.id, l.name, e.name FROM lectures l JOIN exams e ON l.exam_id = e.id")
@@ -1115,70 +1259,74 @@ elif nav == "Active Learning":
         lid = l_ids[l_labels.index(sel_label)]
         lec_path = os.path.join(SLIDE_DIR, str(lid))
 
-        cache = load_slide_cache(lid)
-        if not cache:
-            st.warning("Missing slide_cache.json for this lecture. Re-upload the PDF to rebuild cache.")
+        # Ensure local assets exist by downloading PDF if needed
+        try:
+            ensure_local_assets_for_lecture(lid)
+        except Exception as e:
+            st.error(str(e))
             st.stop()
 
-        if os.path.exists(lec_path):
-            slides = sorted(
-                [f for f in os.listdir(lec_path) if f.endswith(".png")],
-                key=lambda x: int(x.split("_")[1].split(".")[0]),
-            )
-            start = st.session_state.read_idx
+        cache = load_slide_cache(lid)
+        if not cache:
+            st.error("slide_cache.json missing and could not be rebuilt.")
+            st.stop()
 
-            col_slides, col_tools = st.columns([6, 1])
-            with col_slides:
-                end = min(start + 5, len(slides))
-                st.caption(f"Slides {start+1}-{end} of {len(slides)}")
-                st.progress(end / len(slides))
+        slides = sorted(
+            [f for f in os.listdir(lec_path) if f.endswith(".png")],
+            key=lambda x: int(x.split("_")[1].split(".")[0]),
+        )
+        start = st.session_state.read_idx
 
-                current_images = []
-                current_indices = list(range(start, end))
-                for i in range(start, end):
-                    img = PIL.Image.open(os.path.join(lec_path, slides[i]))
-                    current_images.append(img)
-                    st.image(img, use_container_width=True, output_format="PNG")
+        col_slides, col_tools = st.columns([6, 1])
+        with col_slides:
+            end = min(start + 5, len(slides))
+            st.caption(f"Slides {start+1}-{end} of {len(slides)}")
+            st.progress(end / len(slides))
 
-                c_prev, c_next = st.columns(2)
-                if c_prev.button("⬅️ Previous", use_container_width=True) and start > 0:
-                    st.session_state.read_idx = max(0, start - 5)
-                    st.session_state.quiz_data = None
-                    st.rerun()
-                if c_next.button("Next ➡️", use_container_width=True) and end < len(slides):
-                    st.session_state.read_idx = end
-                    st.session_state.quiz_data = None
-                    st.rerun()
+            current_images = []
+            current_indices = list(range(start, end))
+            for i in range(start, end):
+                img = PIL.Image.open(os.path.join(lec_path, slides[i]))
+                current_images.append(img)
+                st.image(img, use_container_width=True, output_format="PNG")
 
-            with col_tools:
-                st.write("#### 🧠 Quick Quiz")
-                if st.button("Generate Quiz", type="primary"):
-                    with st.spinner("AI thinking..."):
-                        st.session_state.quiz_data = generate_quiz_hybrid(lid, current_indices, current_images, cache)
+            c_prev, c_next = st.columns(2)
+            if c_prev.button("⬅️ Previous", use_container_width=True) and start > 0:
+                st.session_state.read_idx = max(0, start - 5)
+                st.session_state.quiz_data = None
+                st.rerun()
+            if c_next.button("Next ➡️", use_container_width=True) and end < len(slides):
+                st.session_state.read_idx = end
+                st.session_state.quiz_data = None
+                st.rerun()
 
-                if st.session_state.quiz_data:
-                    q_data = st.session_state.quiz_data
-                    if isinstance(q_data, list) and q_data and isinstance(q_data[0], dict) and "error" in q_data[0]:
-                        st.error(f"AI Error: {q_data[0]['error']}")
-                    else:
-                        for i, q in enumerate(q_data):
-                            with st.expander(f"Q{i+1}: {q['question']}", expanded=True):
-                                ans = st.radio("Select:", q["options"], key=f"q_{i}")
-                                if st.button("Check", key=f"chk_{i}"):
-                                    corr = q["options"][q["correct_index"]]
-                                    if ans == corr:
-                                        st.success("Correct!")
-                                    else:
-                                        st.error(f"Wrong. Answer: {corr}")
-                                        st.info(q["explanation"])
+        with col_tools:
+            st.write("#### 🧠 Quick Quiz")
+            if st.button("Generate Quiz", type="primary"):
+                with st.spinner("AI thinking..."):
+                    st.session_state.quiz_data = generate_quiz_hybrid(lid, current_indices, current_images, cache)
+
+            if st.session_state.quiz_data:
+                q_data = st.session_state.quiz_data
+                if isinstance(q_data, list) and q_data and isinstance(q_data[0], dict) and "error" in q_data[0]:
+                    st.error(f"AI Error: {q_data[0]['error']}")
+                else:
+                    for i, q in enumerate(q_data):
+                        with st.expander(f"Q{i+1}: {q['question']}", expanded=True):
+                            ans = st.radio("Select:", q["options"], key=f"q_{i}")
+                            if st.button("Check", key=f"chk_{i}"):
+                                corr = q["options"][q["correct_index"]]
+                                if ans == corr:
+                                    st.success("Correct!")
+                                else:
+                                    st.error(f"Wrong. Answer: {corr}")
+                                    st.info(q["explanation"])
 
 # ------------------------------------------
 # 4. EDITOR
 # ------------------------------------------
 elif nav == "Editor":
     st.title("🛠️ Card Editor")
-
-    # refresh cursor each run
     conn, c = get_cursor()
 
     c.execute("SELECT id, name FROM exams")

@@ -16,6 +16,15 @@ from io import BytesIO
 from openai import OpenAI
 
 # ==========================================
+# ✅ ENV DETECTION + PROVIDER ORDER
+# ==========================================
+def running_on_streamlit_cloud() -> bool:
+    # Streamlit Community Cloud is headless and typically sets these env vars
+    return os.environ.get("STREAMLIT_CLOUD", "").lower() == "true" or bool(os.environ.get("STREAMLIT_SERVER_HEADLESS"))
+
+IS_CLOUD = running_on_streamlit_cloud()
+
+# ==========================================
 # ⚙️ CONFIGURATION & THEME ENGINE
 # ==========================================
 st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="centered")
@@ -84,14 +93,21 @@ try:
     openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
     # Local Ollama (optional local-first)
-    OLLAMA_ENABLED = bool(st.secrets.get("OLLAMA_ENABLED", False))
+    # IMPORTANT: force-disable on cloud deployments
+    OLLAMA_ENABLED = (not IS_CLOUD) and bool(st.secrets.get("OLLAMA_ENABLED", False))
     OLLAMA_URL = st.secrets.get("OLLAMA_URL", "http://127.0.0.1:11434")
     OLLAMA_TEXT_MODEL = st.secrets.get("OLLAMA_TEXT_MODEL", "qwen2.5:7b-instruct")
     OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "qwen2.5-vl:7b")
 
 except Exception:
-    st.error("Missing Secrets! Make sure .streamlit/secrets.toml exists.")
+    st.error("Missing Secrets! Make sure Streamlit secrets are set (local: .streamlit/secrets.toml, cloud: app secrets).")
     st.stop()
+
+# Provider order: local uses Ollama first; cloud skips Ollama entirely
+if IS_CLOUD:
+    PROVIDER_ORDER = ["gemini", "openai"]
+else:
+    PROVIDER_ORDER = ["ollama", "gemini", "openai"]
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
@@ -108,9 +124,11 @@ quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_sett
 SLIDE_DIR = "lecture_slides"
 os.makedirs(SLIDE_DIR, exist_ok=True)
 
+# ==========================================
+# ✅ DB: cached connection + auto-reconnect cursor
+# ==========================================
 @st.cache_resource
 def get_db_connection():
-    # Keep a single cached connection object, but we will validate it before use
     return psycopg2.connect(DB_URL)
 
 def get_cursor():
@@ -118,31 +136,26 @@ def get_cursor():
     Returns (conn, cursor) and auto-reconnects if the cached connection was closed.
     """
     conn = get_db_connection()
-
     try:
-        # If connection is closed, psycopg2 sets .closed != 0
         if conn is None or conn.closed != 0:
             raise psycopg2.InterfaceError("Cached connection was closed")
 
-        # Lightweight health check
+        # lightweight health check
         with conn.cursor() as test_cur:
             test_cur.execute("SELECT 1;")
 
         return conn, conn.cursor()
 
     except (psycopg2.InterfaceError, psycopg2.OperationalError):
-        # Kill the cached connection and recreate
         try:
             get_db_connection.clear()
         except Exception:
             pass
-
         conn = get_db_connection()
         return conn, conn.cursor()
 
-# Always use these (instead of global conn/c)
+# Always use these (instead of global conn/c created elsewhere)
 conn, c = get_cursor()
-
 
 # ==========================================
 # 🧠 JSON PARSER (shared)
@@ -152,12 +165,10 @@ def parse_json_response(response_text, payload_name):
     try:
         return json.loads(clean_text)
     except json.JSONDecodeError:
-        # salvage list payloads
         start = clean_text.find("[")
         end = clean_text.rfind("]")
         if start != -1 and end != -1 and end > start:
             return json.loads(clean_text[start:end + 1])
-        # salvage object payloads
         start = clean_text.find("{")
         end = clean_text.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -407,14 +418,12 @@ SLIDES:
 {early}
 """.strip()
 
-    # cheapest path
     try:
         resp = flash_model.generate_content(prompt)
         data = parse_json_response(resp.text, "objectives")
         objs = data.get("objectives", [])
         return [o.strip() for o in objs if isinstance(o, str) and o.strip()]
     except Exception:
-        # fallback to OpenAI text if configured
         if openai_client:
             try:
                 resp_text = openai_generate_text(prompt, model=OPENAI_TEXT_MODEL, timeout=120)
@@ -434,7 +443,7 @@ def objectives_to_string(obj_input, lecture_id):
     return "No objectives provided. Prioritize definitions, formulas, models, comparisons, and drugs."
 
 # ==========================================
-# ✅ HIGH-YIELD GATING (fixes your problem)
+# ✅ HIGH-YIELD GATING
 # ==========================================
 def build_slides_blob(batch_entries, start_idx):
     parts = []
@@ -463,7 +472,7 @@ HARD EXCLUSIONS (mark NOT relevant if mostly these):
 - isolated trivia numbers unless explicitly objective-relevant
 
 RELEVANT if aligned with objectives and is testable:
-- definitions, formulas, decision rules (ICER, QALY, CEA/CUA/CBA, Markov, sensitivity analysis)
+- definitions, formulas, decision rules
 - key comparisons
 - drugs (MOA/uses/AE/contraindications/pearls)
 - model mechanics (states, transitions, costs, probabilities)
@@ -492,7 +501,6 @@ SLIDES:
         data = parse_json_response(resp, "high_yield")
         return data if isinstance(data, list) else []
 
-    # gemini
     resp = flash_model.generate_content(prompt)
     data = parse_json_response(resp.text, "high_yield")
     return data if isinstance(data, list) else []
@@ -525,9 +533,9 @@ OBJECTIVES:
 
 ONLY use the curated HIGH-YIELD NOTES below. Do NOT invent facts.
 Make cards primarily in these styles:
-- Definitions / distinctions (CEA vs CUA vs CBA)
-- Formulas / interpretation (ICER = ΔCost/ΔQALYs; thresholds)
-- Model mechanics (Markov states/transitions; where costs attach)
+- Definitions / distinctions
+- Formulas / interpretation
+- Model mechanics
 - Drug facts (MOA, indications, major adverse effects, pearls)
 
 Avoid:
@@ -555,7 +563,6 @@ HIGH-YIELD NOTES:
             return [(x["front"], x["back"]) for x in data if isinstance(x, dict) and "front" in x and "back" in x]
         return []
 
-    # gemini
     resp = flash_model.generate_content(prompt)
     data = parse_json_response(resp.text, "flashcards")
     if isinstance(data, list):
@@ -625,61 +632,84 @@ SLIDES:
     return parse_json_response(resp, "quiz")
 
 # ==========================================
-# 🧠 HYBRID WRAPPERS (Local-first -> Cloud fallback)
+# 🧠 HYBRID WRAPPERS (provider-ordered)
 # ==========================================
 def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, objectives_input, start_idx):
     cache = ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
     batch_entries = [cache[i] for i in batch_indices]
     objectives_str = objectives_to_string(objectives_input, lecture_id)
 
-    # 1) Local-first (Ollama): high-yield gate -> cards
-    if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
-        try:
-            hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="ollama")
-            notes = condensed_notes_from_high_yield(hy)
-            cards = generate_cards_from_notes(notes, objectives_str, provider="ollama")
-            if cards:
-                return cards, None
-        except Exception:
-            pass
+    last_err = None
 
-    # 2) Cloud primary (Gemini): high-yield gate -> cards (text-only, reliable)
-    try:
-        hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini")
-        notes = condensed_notes_from_high_yield(hy)
-        cards = generate_cards_from_notes(notes, objectives_str, provider="gemini")
-        if cards:
-            return cards, None
-    except Exception as e:
-        gem_err = str(e)
-    else:
-        gem_err = "Gemini produced no cards (likely no relevant slides in this batch)."
-
-    # 3) Cloud fallback (OpenAI text): high-yield gate -> cards
-    if openai_client:
+    for provider in PROVIDER_ORDER:
         try:
-            hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="openai")
-            notes = condensed_notes_from_high_yield(hy)
-            cards = generate_cards_from_notes(notes, objectives_str, provider="openai")
-            if cards:
-                return cards, None
-            return [], f"Gemini path issue ({gem_err}); OpenAI returned no cards"
+            if provider == "ollama":
+                if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
+                    hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="ollama")
+                    notes = condensed_notes_from_high_yield(hy)
+                    cards = generate_cards_from_notes(notes, objectives_str, provider="ollama")
+                    if cards:
+                        return cards, None
+                    last_err = "Ollama produced no cards (batch may be non-relevant)."
+
+            elif provider == "gemini":
+                hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini")
+                notes = condensed_notes_from_high_yield(hy)
+                cards = generate_cards_from_notes(notes, objectives_str, provider="gemini")
+                if cards:
+                    return cards, None
+                last_err = "Gemini produced no cards (likely no relevant slides in this batch)."
+
+            elif provider == "openai":
+                if openai_client:
+                    hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="openai")
+                    notes = condensed_notes_from_high_yield(hy)
+                    cards = generate_cards_from_notes(notes, objectives_str, provider="openai")
+                    if cards:
+                        return cards, None
+                    last_err = "OpenAI produced no cards (batch may be non-relevant)."
+                else:
+                    last_err = "OpenAI not configured."
+
         except Exception as e:
-            return [], f"Gemini path issue ({gem_err}); OpenAI failed ({e})"
+            last_err = f"{provider} failed: {e}"
 
-    return [], f"Gemini path issue ({gem_err}); OpenAI not configured"
+    return [], f"All providers failed or returned no cards. Last: {last_err}"
 
 def generate_quiz_hybrid(lecture_id, batch_indices, batch_images, cache):
     cache = ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
     batch_entries = [cache[i] for i in batch_indices]
 
-    if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
+    last_err = None
+    for provider in PROVIDER_ORDER:
         try:
-            return generate_quiz_local_textfirst(batch_entries)
-        except Exception:
-            pass
+            if provider == "ollama":
+                if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
+                    return generate_quiz_local_textfirst(batch_entries)
+                last_err = "Ollama disabled/unreachable."
 
-    return generate_quiz_cloud_fallback(batch_images)
+            elif provider == "gemini":
+                q = generate_interactive_quiz_gemini(batch_images)
+                if isinstance(q, list) and q and isinstance(q[0], dict) and "error" not in q[0]:
+                    return q
+                last_err = f"Gemini quiz error: {q[0].get('error') if isinstance(q, list) and q else 'unknown'}"
+
+            elif provider == "openai":
+                if openai_client:
+                    prompt = """
+Create a 5-question multiple choice quiz based on these slides.
+Target Audience: Pharmacy Students (NAPLEX level).
+IMPORTANT: Return ONLY a JSON list. Do not use Markdown blocks.
+Structure: [ { "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "correct_index": 0, "explanation": "..." } ]
+""".strip()
+                    resp_text = openai_generate_vision(prompt, batch_images, model=OPENAI_VISION_MODEL)
+                    return parse_json_response(resp_text, "quiz")
+                last_err = "OpenAI not configured."
+
+        except Exception as e:
+            last_err = f"{provider} failed: {e}"
+
+    return [{"error": f"All providers failed. Last: {last_err}"}]
 
 # ==========================================
 # 🖥️ UI STATE
@@ -705,6 +735,9 @@ def open_lecture_callback(lid):
 if nav == "Review":
     st.title("🧠 Study Center")
     today = date.today()
+
+    # refresh cursor each run (prevents "connection already closed" on reruns)
+    conn, c = get_cursor()
 
     if "session_active" not in st.session_state:
         st.session_state.session_active = False
@@ -786,6 +819,10 @@ if nav == "Review":
                 st.markdown(f'<div class="flashcard flashcard-back"><small>ANSWER</small><br>{back}</div>', unsafe_allow_html=True)
 
                 def answer(quality):
+                    nonlocal conn, c
+                    # refresh connection to be safe before writes
+                    conn, c = get_cursor()
+
                     if quality in [0, 3]:
                         st.session_state.missed_content.append(f"Q: {front} | A: {back}")
                         if lid not in st.session_state.trouble_lectures:
@@ -809,8 +846,10 @@ if nav == "Review":
                         if new_interval >= days_limit:
                             new_interval = max(1, days_limit - 1)
 
-                    c.execute("UPDATE cards SET next_review=%s, interval=%s, ease=%s, review_count=%s WHERE id=%s",
-                              (today + timedelta(days=new_interval), new_interval, new_ease, revs + 1, cid))
+                    c.execute(
+                        "UPDATE cards SET next_review=%s, interval=%s, ease=%s, review_count=%s WHERE id=%s",
+                        (today + timedelta(days=new_interval), new_interval, new_ease, revs + 1, cid),
+                    )
                     conn.commit()
                     st.session_state.show, st.session_state.idx = False, st.session_state.idx + 1
                     st.rerun()
@@ -869,6 +908,10 @@ if nav == "Review":
 # ------------------------------------------
 elif nav == "Library":
     st.title("📂 Library")
+
+    # refresh cursor each run (prevents stale connection)
+    conn, c = get_cursor()
+
     tab_browse, tab_upload, tab_manage = st.tabs(["📚 Browse Materials", "☁️ Upload New", "⚙️ Manage"])
 
     with tab_browse:
@@ -912,7 +955,6 @@ elif nav == "Library":
                                                 st.warning("Missing slide_cache.json. Re-upload lecture to rebuild cache.")
                                                 st.stop()
 
-                                            # Use stored objectives if available
                                             stored_obj = "\n".join(f"- {x}" for x in load_objectives(lid)) or ""
 
                                             st.toast(f"Processing {len(images)} slides...", icon="⚡")
@@ -921,8 +963,10 @@ elif nav == "Library":
                                                 batch_indices = list(range(i, min(i+10, len(images))))
                                                 new_cards, error = generate_cards_hybrid(lid, batch_indices, batch_imgs, cache, stored_obj, i)
                                                 if error:
-                                                    st.error(f"AI flashcard error: {error}")
+                                                    st.error(f"AI flashcard note: {error}")
                                                 if new_cards:
+                                                    # refresh cursor before inserts
+                                                    conn, c = get_cursor()
                                                     for f, b in new_cards:
                                                         c.execute(
                                                             "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
@@ -933,6 +977,8 @@ elif nav == "Library":
                         st.divider()
 
     with tab_upload:
+        conn, c = get_cursor()
+
         c.execute("SELECT id, name FROM classes")
         classes = c.fetchall()
         if not classes:
@@ -969,6 +1015,9 @@ elif nav == "Library":
                     for uploaded in uploaded_files:
                         status.write(f"Reading {uploaded.name}...")
 
+                        # refresh cursor for each upload iteration
+                        conn, c = get_cursor()
+
                         pdf_bytes = uploaded.getvalue()
 
                         c.execute(
@@ -982,14 +1031,12 @@ elif nav == "Library":
                         slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
                         cache = build_slide_cache(lid, slide_texts)
 
-                        # Auto-extract objectives if user didn't provide them
                         if not (objs and objs.strip()):
                             status.write("Auto-extracting learning objectives...")
                             auto_objs = extract_objectives_from_slide_texts(slide_texts, max_slides=8)
                             save_objectives(lid, auto_objs)
                             objectives_input = "\n".join(f"- {x}" for x in auto_objs)
                         else:
-                            # store user objectives too (so retries use same guidance)
                             user_list = [x.strip("- ").strip() for x in objs.splitlines() if x.strip()]
                             save_objectives(lid, user_list)
                             objectives_input = objs
@@ -1007,6 +1054,7 @@ elif nav == "Library":
                                 status.write(f"AI flashcard note: {error}")
 
                             if new_cards:
+                                conn, c = get_cursor()
                                 for f, b in new_cards:
                                     c.execute(
                                         "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
@@ -1020,6 +1068,8 @@ elif nav == "Library":
                     st.rerun()
 
     with tab_manage:
+        conn, c = get_cursor()
+
         new_class = st.text_input("Create New Class Name")
         if st.button("Create Class"):
             if not new_class.strip():
@@ -1051,6 +1101,10 @@ elif nav == "Library":
 # ------------------------------------------
 elif nav == "Active Learning":
     st.title("👨‍🏫 Active Learning")
+
+    # refresh cursor each run
+    conn, c = get_cursor()
+
     c.execute("SELECT l.id, l.name, e.name FROM lectures l JOIN exams e ON l.exam_id = e.id")
     all_lecs = c.fetchall()
     if not all_lecs:
@@ -1088,7 +1142,6 @@ elif nav == "Active Learning":
                     current_images.append(img)
                     st.image(img, use_container_width=True, output_format="PNG")
 
-
                 c_prev, c_next = st.columns(2)
                 if c_prev.button("⬅️ Previous", use_container_width=True) and start > 0:
                     st.session_state.read_idx = max(0, start - 5)
@@ -1102,7 +1155,7 @@ elif nav == "Active Learning":
             with col_tools:
                 st.write("#### 🧠 Quick Quiz")
                 if st.button("Generate Quiz", type="primary"):
-                    with st.spinner("AI thinking (local-first, cloud-fallback)..."):
+                    with st.spinner("AI thinking..."):
                         st.session_state.quiz_data = generate_quiz_hybrid(lid, current_indices, current_images, cache)
 
                 if st.session_state.quiz_data:
@@ -1126,6 +1179,10 @@ elif nav == "Active Learning":
 # ------------------------------------------
 elif nav == "Editor":
     st.title("🛠️ Card Editor")
+
+    # refresh cursor each run
+    conn, c = get_cursor()
+
     c.execute("SELECT id, name FROM exams")
     exams = c.fetchall()
     if exams:
@@ -1136,6 +1193,7 @@ elif nav == "Editor":
         df = pd.read_sql(query, conn, params=(eid,))
         edited = st.data_editor(df, num_rows="dynamic", key="editor", use_container_width=True)
         if st.button("Save Changes", type="primary"):
+            conn, c = get_cursor()
             for _, row in edited.iterrows():
                 c.execute("UPDATE cards SET front=%s, back=%s WHERE id=%s", (row["front"], row["back"], int(row["id"])))
             conn.commit()

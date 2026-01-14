@@ -819,8 +819,6 @@ if nav == "Review":
                 st.markdown(f'<div class="flashcard flashcard-back"><small>ANSWER</small><br>{back}</div>', unsafe_allow_html=True)
 
                 def answer(quality):
-                    nonlocal conn, c
-                    # refresh connection to be safe before writes
                     conn, c = get_cursor()
 
                     if quality in [0, 3]:

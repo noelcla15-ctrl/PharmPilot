@@ -14,6 +14,7 @@ import requests
 import base64
 from io import BytesIO
 from openai import OpenAI
+from contextlib import contextmanager
 
 # ==========================================
 # ✅ ENV DETECTION + PROVIDER ORDER
@@ -91,7 +92,10 @@ try:
     SUPABASE_BUCKET = st.secrets.get("SUPABASE_STORAGE_BUCKET", "pharmpilot")
     SUPABASE_PDF_PREFIX = st.secrets.get("SUPABASE_PDF_PREFIX", "lectures")  # folder inside bucket
 
-    # OpenAI (fallback when Gemini fails)
+    # Optional: retention (days) for PDFs in storage (only works if your storage policies allow anon deletes)
+    PDF_RETENTION_DAYS = int(st.secrets.get("PDF_RETENTION_DAYS", 30))
+
+    # OpenAI fallback
     OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
     OPENAI_TEXT_MODEL = st.secrets.get("OPENAI_TEXT_MODEL", "gpt-4o-mini")
     OPENAI_VISION_MODEL = st.secrets.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
@@ -114,6 +118,7 @@ except Exception:
         "Optional:\n"
         "- SUPABASE_STORAGE_BUCKET (default: pharmpilot)\n"
         "- SUPABASE_PDF_PREFIX (default: lectures)\n"
+        "- PDF_RETENTION_DAYS (default: 30)\n"
     )
     st.stop()
 
@@ -135,40 +140,114 @@ safety_settings = [
 flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
 quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
 
-# Local ephemeral cache dir (works locally; on cloud it's transient but OK)
+# Local ephemeral cache dir
 SLIDE_DIR = "lecture_slides"
 os.makedirs(SLIDE_DIR, exist_ok=True)
 
 # ==========================================
-# ✅ DB: cached connection + auto-reconnect cursor
+# ✅ DB: cached connection + safe cursor context
+#    Fixes "idle in transaction" by ensuring cursors close and commits happen.
 # ==========================================
 @st.cache_resource
 def get_db_connection():
     return psycopg2.connect(DB_URL)
 
-def get_cursor():
-    """
-    Returns (conn, cursor) and auto-reconnects if the cached connection was closed.
-    """
+def _healthcheck(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1;")
+
+def get_conn():
     conn = get_db_connection()
     try:
         if conn is None or conn.closed != 0:
             raise psycopg2.InterfaceError("Cached connection was closed")
-
-        with conn.cursor() as test_cur:
-            test_cur.execute("SELECT 1;")
-
-        return conn, conn.cursor()
-
+        _healthcheck(conn)
+        return conn
     except (psycopg2.InterfaceError, psycopg2.OperationalError):
         try:
             get_db_connection.clear()
         except Exception:
             pass
         conn = get_db_connection()
-        return conn, conn.cursor()
+        _healthcheck(conn)
+        return conn
 
-conn, c = get_cursor()
+@contextmanager
+def db_cursor(commit: bool = False):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        yield conn, cur
+        if commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+# ==========================================
+# 🧹 SCHEMA ENSURE (pdf_path + SR improvements columns)
+# ==========================================
+def ensure_schema():
+    with db_cursor(commit=True) as (_conn, c):
+        # lectures.pdf_path
+        c.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='lectures' AND column_name='pdf_path'
+            );
+            """
+        )
+        if not c.fetchone()[0]:
+            c.execute("ALTER TABLE lectures ADD COLUMN pdf_path TEXT;")
+
+        # cards.lapses + cards.last_reviewed (minimal SR upgrade without breaking existing rows)
+        c.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='cards' AND column_name='lapses'
+            );
+            """
+        )
+        if not c.fetchone()[0]:
+            c.execute("ALTER TABLE cards ADD COLUMN lapses INT DEFAULT 0;")
+
+        c.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='cards' AND column_name='last_reviewed'
+            );
+            """
+        )
+        if not c.fetchone()[0]:
+            c.execute("ALTER TABLE cards ADD COLUMN last_reviewed DATE;")
+
+ensure_schema()
+
+# ==========================================
+# 🧹 AUTOMATIC DATABASE CLEANUP (runs once per day per session)
+# ==========================================
+def run_cleanup_once_per_day():
+    today_iso = date.today().isoformat()
+    if st.session_state.get("last_cleanup") == today_iso:
+        return
+    try:
+        with db_cursor(commit=True) as (_conn, c):
+            # Optional: if you created this function in DB
+            c.execute("select public.cleanup_old_cards();")
+        st.session_state["last_cleanup"] = today_iso
+    except Exception as e:
+        # keep silent in UI; avoid breaking app
+        print("Cleanup failed:", e)
+
+run_cleanup_once_per_day()
 
 # ==========================================
 # ✅ Supabase Storage (PDF-only) via REST
@@ -186,10 +265,6 @@ def supabase_pdf_object_path(lecture_id: int) -> str:
     return f"{SUPABASE_PDF_PREFIX}/{lecture_id}.pdf"
 
 def upload_pdf_to_supabase(lecture_id: int, pdf_bytes: bytes) -> str:
-    """
-    Uploads lecture PDF to Supabase Storage bucket; overwrites if exists.
-    Returns the object path saved.
-    """
     obj_path = supabase_pdf_object_path(lecture_id)
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{obj_path}"
     r = requests.post(
@@ -204,37 +279,20 @@ def upload_pdf_to_supabase(lecture_id: int, pdf_bytes: bytes) -> str:
     return obj_path
 
 def download_pdf_from_supabase(object_path: str) -> bytes:
-    """
-    Downloads lecture PDF bytes from Supabase Storage.
-    """
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{object_path}"
     r = requests.get(url, headers=_supabase_storage_headers(), timeout=60)
     if not (200 <= r.status_code < 300):
         raise RuntimeError(f"Supabase download failed ({r.status_code}): {r.text}")
     return r.content
 
-def ensure_lecture_has_pdf_path_column():
+def delete_pdf_from_supabase(object_path: str) -> bool:
     """
-    Adds lectures.pdf_path column if missing.
-    Safe to call on startup.
+    Deletes an object from Supabase storage.
+    NOTE: This will only work if your bucket policies allow deletes with anon key.
     """
-    conn, c = get_cursor()
-    c.execute(
-        """
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_name='lectures' AND column_name='pdf_path'
-        );
-        """
-    )
-    exists = c.fetchone()[0]
-    if not exists:
-        # minimal safe schema update
-        c.execute("ALTER TABLE lectures ADD COLUMN pdf_path TEXT;")
-        conn.commit()
-
-ensure_lecture_has_pdf_path_column()
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{object_path}"
+    r = requests.delete(url, headers=_supabase_storage_headers(), timeout=30)
+    return 200 <= r.status_code < 300
 
 # ==========================================
 # 🧠 JSON PARSER (shared)
@@ -356,11 +414,7 @@ def extract_slide_texts_from_pdf_bytes(pdf_bytes: bytes):
         texts.append(txt)
     return texts
 
-def save_slides_locally_from_pdf_bytes(pdf_bytes: bytes, lecture_id, dpi=250):
-    """
-    Renders slide PNGs locally (ephemeral cache).
-    Returns PIL images.
-    """
+def save_slides_locally_from_pdf_bytes(pdf_bytes: bytes, lecture_id: int, dpi=250):
     slide_images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     lec_path = os.path.join(SLIDE_DIR, str(lecture_id))
@@ -387,7 +441,7 @@ def save_slides_locally_from_pdf_bytes(pdf_bytes: bytes, lecture_id, dpi=250):
 def slide_needs_vision(slide_text: str, min_chars=140):
     return len((slide_text or "").strip()) < min_chars
 
-def load_slide_cache(lecture_id):
+def load_slide_cache(lecture_id: int):
     cache_path = os.path.join(SLIDE_DIR, str(lecture_id), "slide_cache.json")
     if os.path.exists(cache_path):
         try:
@@ -397,20 +451,15 @@ def load_slide_cache(lecture_id):
             return None
     return None
 
-def save_slide_cache(lecture_id, cache_obj):
+def save_slide_cache(lecture_id: int, cache_obj):
     cache_path = os.path.join(SLIDE_DIR, str(lecture_id), "slide_cache.json")
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(cache_obj, f, ensure_ascii=False, indent=2)
 
-def build_slide_cache(lecture_id, slide_texts):
+def build_slide_cache(lecture_id: int, slide_texts):
     cache = []
     for i, t in enumerate(slide_texts):
-        cache.append({
-            "i": i,
-            "text": t,
-            "needs_vision": slide_needs_vision(t),
-            "image_notes": ""
-        })
+        cache.append({"i": i, "text": t, "needs_vision": slide_needs_vision(t), "image_notes": ""})
     save_slide_cache(lecture_id, cache)
     return cache
 
@@ -432,8 +481,8 @@ def ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
 
     GROUP = 2
     for start in range(0, len(to_process), GROUP):
-        imgs = to_process[start:start+GROUP]
-        slide_idxs = to_process_slide_idxs[start:start+GROUP]
+        imgs = to_process[start:start + GROUP]
+        slide_idxs = to_process_slide_idxs[start:start + GROUP]
 
         prompt = """
 You are interpreting pharmacy lecture slides with diagrams/figures.
@@ -463,55 +512,15 @@ Return items in the same order as the images.
 # ==========================================
 # ✅ Ensure local cache exists by downloading PDF from Supabase when needed
 # ==========================================
-def ensure_local_assets_for_lecture(lecture_id: int):
-    """
-    Ensures we have:
-    - local slide PNGs
-    - slide_cache.json
-    by downloading the lecture PDF from Supabase Storage when missing.
-    """
-    lec_path = os.path.join(SLIDE_DIR, str(lecture_id))
-    cache = load_slide_cache(lecture_id)
-
-    have_pngs = os.path.exists(lec_path) and any(
-        f.endswith(".png") and f.startswith("slide_") for f in os.listdir(lec_path)
-    )
-
-    if cache is not None and have_pngs:
-        return  # already good
-
-    # pull pdf_path from DB
-    conn, c = get_cursor()
-    c.execute("SELECT pdf_path FROM lectures WHERE id=%s", (lecture_id,))
-    row = c.fetchone()
-    pdf_path = row[0] if row else None
-    if not pdf_path:
-        raise RuntimeError("Lecture PDF not found in Supabase (missing lectures.pdf_path). Re-upload that lecture.")
-
-    pdf_bytes = download_pdf_from_supabase(pdf_path)
-
-    # (re)render slides locally and rebuild cache
-    images = save_slides_locally_from_pdf_bytes(pdf_bytes, lecture_id, dpi=250)
-    slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
-    build_slide_cache(lecture_id, slide_texts)
-
-    # objectives also stored locally; if missing, regenerate and save
-    if not load_objectives(lecture_id):
-        auto_objs = extract_objectives_from_slide_texts(slide_texts, max_slides=8)
-        save_objectives(lecture_id, auto_objs)
-
-# ==========================================
-# 🎯 OBJECTIVES (AUTO-EXTRACT + STORE)
-# ==========================================
-def objectives_path(lecture_id):
+def objectives_path(lecture_id: int):
     return os.path.join(SLIDE_DIR, str(lecture_id), "objectives.json")
 
-def save_objectives(lecture_id, objectives_list):
+def save_objectives(lecture_id: int, objectives_list):
     os.makedirs(os.path.join(SLIDE_DIR, str(lecture_id)), exist_ok=True)
     with open(objectives_path(lecture_id), "w", encoding="utf-8") as f:
         json.dump({"objectives": objectives_list}, f, ensure_ascii=False, indent=2)
 
-def load_objectives(lecture_id):
+def load_objectives(lecture_id: int):
     p = objectives_path(lecture_id)
     if os.path.exists(p):
         try:
@@ -522,10 +531,7 @@ def load_objectives(lecture_id):
     return []
 
 def extract_objectives_from_slide_texts(slide_texts, max_slides=8):
-    early = "\n\n".join(
-        [f"Slide {i+1}:\n{slide_texts[i]}" for i in range(min(max_slides, len(slide_texts)))]
-    )
-
+    early = "\n\n".join([f"Slide {i+1}:\n{slide_texts[i]}" for i in range(min(max_slides, len(slide_texts)))])
     prompt = f"""
 Extract the lecture LEARNING OBJECTIVES from the early slides below.
 
@@ -557,13 +563,40 @@ SLIDES:
                 pass
     return []
 
-def objectives_to_string(obj_input, lecture_id):
+def objectives_to_string(obj_input, lecture_id: int):
     if obj_input and obj_input.strip():
         return obj_input.strip()
     stored = load_objectives(lecture_id)
     if stored:
         return "\n".join(f"- {x}" for x in stored)
     return "No objectives provided. Prioritize definitions, formulas, models, comparisons, and drugs."
+
+def ensure_local_assets_for_lecture(lecture_id: int):
+    lec_path = os.path.join(SLIDE_DIR, str(lecture_id))
+    cache = load_slide_cache(lecture_id)
+
+    have_pngs = os.path.exists(lec_path) and any(
+        f.endswith(".png") and f.startswith("slide_") for f in os.listdir(lec_path)
+    )
+
+    if cache is not None and have_pngs:
+        return
+
+    with db_cursor() as (_conn, c):
+        c.execute("SELECT pdf_path FROM lectures WHERE id=%s", (lecture_id,))
+        row = c.fetchone()
+    pdf_path = row[0] if row else None
+    if not pdf_path:
+        raise RuntimeError("Lecture PDF not found (missing lectures.pdf_path). Re-upload that lecture.")
+
+    pdf_bytes = download_pdf_from_supabase(pdf_path)
+    _ = save_slides_locally_from_pdf_bytes(pdf_bytes, lecture_id, dpi=250)
+    slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
+    build_slide_cache(lecture_id, slide_texts)
+
+    if not load_objectives(lecture_id):
+        auto_objs = extract_objectives_from_slide_texts(slide_texts, max_slides=8)
+        save_objectives(lecture_id, auto_objs)
 
 # ==========================================
 # ✅ HIGH-YIELD GATING
@@ -574,9 +607,7 @@ def build_slides_blob(batch_entries, start_idx):
         slide_no = start_idx + k + 1
         txt = entry.get("text", "") or ""
         img_notes = entry.get("image_notes", "") or ""
-        parts.append(
-            f"--- Slide {slide_no} ---\nTEXT:\n{txt}\n\nIMAGE_NOTES:\n{img_notes}".strip()
-        )
+        parts.append(f"--- Slide {slide_no} ---\nTEXT:\n{txt}\n\nIMAGE_NOTES:\n{img_notes}".strip())
     return "\n\n".join(parts)
 
 def extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini"):
@@ -639,9 +670,7 @@ def condensed_notes_from_high_yield(high_yield_items):
         kt = item.get("key_terms") or []
         slide_no = item.get("slide")
         if kp:
-            condensed.append(
-                f"Slide {slide_no}:\nKEY_TERMS: {kt}\nKEY_POINTS:\n- " + "\n- ".join(kp)
-            )
+            condensed.append(f"Slide {slide_no}:\nKEY_TERMS: {kt}\nKEY_POINTS:\n- " + "\n- ".join(kp))
     return "\n\n".join(condensed).strip()
 
 def generate_cards_from_notes(notes_blob, objectives_str, provider="gemini"):
@@ -709,29 +738,6 @@ Structure: [ { "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) 
     except Exception as e:
         return [{"error": str(e)}]
 
-def generate_quiz_cloud_fallback(batch_images):
-    q = generate_interactive_quiz_gemini(batch_images)
-    if isinstance(q, list) and q and isinstance(q[0], dict) and "error" not in q[0]:
-        return q
-
-    if openai_client:
-        prompt = """
-Create a 5-question multiple choice quiz based on these slides.
-Target Audience: Pharmacy Students (NAPLEX level).
-IMPORTANT: Return ONLY a JSON list. Do not use Markdown blocks.
-Structure: [ { "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "correct_index": 0, "explanation": "..." } ]
-""".strip()
-        try:
-            resp_text = openai_generate_vision(prompt, batch_images, model=OPENAI_VISION_MODEL)
-            return parse_json_response(resp_text, "quiz")
-        except Exception as e:
-            return [{"error": f"Gemini failed and OpenAI failed: {e}"}]
-
-    return [{"error": "Gemini failed and OpenAI not configured."}]
-
-# ==========================================
-# 🧠 LOCAL QUIZ (text-first)
-# ==========================================
 def generate_quiz_local_textfirst(batch_entries):
     slides_blob = build_slides_blob(batch_entries, start_idx=0)
     prompt = f"""
@@ -755,7 +761,7 @@ SLIDES:
     return parse_json_response(resp, "quiz")
 
 # ==========================================
-# 🧠 HYBRID WRAPPERS (provider-ordered)
+# 🧠 HYBRID WRAPPERS
 # ==========================================
 def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, objectives_input, start_idx):
     cache = ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
@@ -763,7 +769,6 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
     objectives_str = objectives_to_string(objectives_input, lecture_id)
 
     last_err = None
-
     for provider in PROVIDER_ORDER:
         try:
             if provider == "ollama":
@@ -773,7 +778,7 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
                     cards = generate_cards_from_notes(notes, objectives_str, provider="ollama")
                     if cards:
                         return cards, None
-                    last_err = "Ollama produced no cards (batch may be non-relevant)."
+                    last_err = "Ollama produced no cards."
 
             elif provider == "gemini":
                 hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini")
@@ -781,7 +786,7 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
                 cards = generate_cards_from_notes(notes, objectives_str, provider="gemini")
                 if cards:
                     return cards, None
-                last_err = "Gemini produced no cards (likely no relevant slides in this batch)."
+                last_err = "Gemini produced no cards."
 
             elif provider == "openai":
                 if openai_client:
@@ -790,7 +795,7 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
                     cards = generate_cards_from_notes(notes, objectives_str, provider="openai")
                     if cards:
                         return cards, None
-                    last_err = "OpenAI produced no cards (batch may be non-relevant)."
+                    last_err = "OpenAI produced no cards."
                 else:
                     last_err = "OpenAI not configured."
 
@@ -835,6 +840,75 @@ Structure: [ { "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) 
     return [{"error": f"All providers failed. Last: {last_err}"}]
 
 # ==========================================
+# ✅ SPACED REPETITION OVERHAUL (exam-aware SM-2-ish)
+# ==========================================
+def sr_compute_next(interval: int | None, ease: float | None, review_count: int | None, lapses: int | None, quality: int):
+    """
+    Returns (new_interval_days:int, new_ease:float, new_lapses:int)
+
+    quality: 0=Again, 3=Hard, 4=Good, 5=Easy
+    - Fixes "Hard" behavior: Hard should not push interval out more than Good.
+    - Adds lapse tracking.
+    - Handles new cards with a short learning ramp (day-granularity).
+    """
+    interval = int(interval) if interval and interval > 0 else 1
+    ease = float(ease) if ease else 2.3
+    review_count = int(review_count) if review_count is not None else 0
+    lapses = int(lapses) if lapses is not None else 0
+
+    # clamp ease
+    ease = max(1.3, min(3.0, ease))
+
+    # NEW CARD BOOTSTRAP (first successful reviews)
+    # Day-granularity learning ramp:
+    # - Good => 3 days, Easy => 4 days, Hard => 1 day, Again => 1 day
+    if review_count == 0:
+        if quality == 0:
+            return 1, max(1.3, ease - 0.2), lapses + 1
+        if quality == 3:
+            return 1, max(1.3, ease - 0.1), lapses
+        if quality == 4:
+            return 3, ease, lapses
+        if quality == 5:
+            return 4, min(3.0, ease + 0.1), lapses
+
+    # REVIEW PHASE
+    if quality == 0:
+        lapses += 1
+        ease = max(1.3, ease - 0.2)
+        # relearn: back tomorrow
+        return 1, ease, lapses
+
+    if quality == 3:
+        # Hard should be smaller than Good; also slightly penalize ease
+        ease = max(1.3, ease - 0.15)
+        good_int = max(2, int(round(interval * ease)))
+        hard_int = max(1, int(round(interval * 1.2)))
+        # ensure hard < good when possible
+        if hard_int >= good_int:
+            hard_int = max(1, good_int - 1)
+        return hard_int, ease, lapses
+
+    if quality == 4:
+        new_int = max(2, int(round(interval * ease)))
+        return new_int, ease, lapses
+
+    if quality == 5:
+        ease = min(3.0, ease + 0.15)
+        new_int = max(3, int(round(interval * ease * 1.3)))
+        return new_int, ease, lapses
+
+    # fallback
+    return max(1, interval), ease, lapses
+
+def apply_exam_cap(new_interval: int, exam_date: date | None, today: date):
+    if exam_date and (exam_date - today).days > 0:
+        days_limit = (exam_date - today).days
+        if new_interval >= days_limit:
+            return max(1, days_limit - 1)
+    return new_interval
+
+# ==========================================
 # 🖥️ UI STATE
 # ==========================================
 if "main_nav" not in st.session_state:
@@ -858,7 +932,6 @@ def open_lecture_callback(lid):
 if nav == "Review":
     st.title("🧠 Study Center")
     today = date.today()
-    conn, c = get_cursor()
 
     if "session_active" not in st.session_state:
         st.session_state.session_active = False
@@ -869,15 +942,20 @@ if nav == "Review":
     if "missed_content" not in st.session_state:
         st.session_state.missed_content = []
 
-    c.execute("""
-        SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, l.id, l.name, e.exam_date, e.name, e.id
-        FROM cards c
-        JOIN lectures l ON c.lecture_id = l.id
-        JOIN exams e ON l.exam_id = e.id
-        WHERE c.next_review <= %s
-        ORDER BY c.next_review ASC LIMIT 50
-    """, (today,))
-    cards_due = c.fetchall()
+    with db_cursor() as (conn, c):
+        c.execute("""
+            SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, c.lapses,
+                   l.id, l.name, e.exam_date, e.name, e.id
+            FROM cards c
+            JOIN lectures l ON c.lecture_id = l.id
+            JOIN exams e ON l.exam_id = e.id
+            WHERE c.next_review <= %s
+            ORDER BY c.next_review ASC LIMIT 50
+        """, (today,))
+        cards_due = c.fetchall()
+
+        c.execute("SELECT name, exam_date FROM exams WHERE exam_date >= %s ORDER BY exam_date ASC LIMIT 1", (today,))
+        next_ex = c.fetchone()
 
     if not st.session_state.session_active:
         if not cards_due:
@@ -886,8 +964,6 @@ if nav == "Review":
             st.metric("🔥 Current Streak", f"{st.session_state.streak} Days")
         else:
             total_due = len(cards_due)
-            c.execute("SELECT name, exam_date FROM exams WHERE exam_date >= %s ORDER BY exam_date ASC LIMIT 1", (today,))
-            next_ex = c.fetchone()
 
             st.markdown("### 📊 Session Overview")
             col1, col2, col3, col4 = st.columns(4)
@@ -930,7 +1006,11 @@ if nav == "Review":
             c_left.caption(f"Card {st.session_state.idx + 1} of {total_cards}")
             c_right.markdown(f"<p style='text-align:right; font-weight:bold;'>{time_display}</p>", unsafe_allow_html=True)
 
-            cid, front, back, interval, ease, revs, lid, lname, exam_date, exam_name, eid = cards_due[st.session_state.idx]
+            (
+                cid, front, back, interval, ease, revs, lapses,
+                lid, lname, exam_date, exam_name, eid
+            ) = cards_due[st.session_state.idx]
+
             if "card_load_time" not in st.session_state or not st.session_state.show:
                 st.session_state.card_load_time = time.time()
 
@@ -939,9 +1019,8 @@ if nav == "Review":
             if st.session_state.show:
                 st.markdown(f'<div class="flashcard flashcard-back"><small>ANSWER</small><br>{back}</div>', unsafe_allow_html=True)
 
-                def answer(quality):
-                    conn, c = get_cursor()
-
+                def answer(quality: int):
+                    # Track trouble content for Again/Hard
                     if quality in [0, 3]:
                         st.session_state.missed_content.append(f"Q: {front} | A: {back}")
                         if lid not in st.session_state.trouble_lectures:
@@ -950,27 +1029,35 @@ if nav == "Review":
                             st.session_state.trouble_lectures[lid]["count"] += 1
 
                     st.session_state.total_seconds += (time.time() - st.session_state.card_load_time)
-                    new_ease, new_interval = ease, interval
-                    if quality == 0:
-                        new_interval, new_ease = 1, max(1.3, ease - 0.2)
-                    elif quality == 3:
-                        new_interval, new_ease = max(1, int(interval * 1.2)), max(1.3, ease - 0.15)
-                    elif quality == 4:
-                        new_interval = max(1, int(interval * ease))
-                    elif quality == 5:
-                        new_interval, new_ease = max(1, int(interval * ease * 1.3)), min(3.0, ease + 0.15)
 
-                    if exam_date and (exam_date - today).days > 0:
-                        days_limit = (exam_date - today).days
-                        if new_interval >= days_limit:
-                            new_interval = max(1, days_limit - 1)
-
-                    c.execute(
-                        "UPDATE cards SET next_review=%s, interval=%s, ease=%s, review_count=%s WHERE id=%s",
-                        (today + timedelta(days=new_interval), new_interval, new_ease, revs + 1, cid),
+                    new_interval, new_ease, new_lapses = sr_compute_next(
+                        interval=interval,
+                        ease=ease,
+                        review_count=revs,
+                        lapses=lapses,
+                        quality=quality
                     )
-                    conn.commit()
-                    st.session_state.show, st.session_state.idx = False, st.session_state.idx + 1
+                    new_interval = apply_exam_cap(new_interval, exam_date, today)
+
+                    next_review = today + timedelta(days=int(new_interval))
+
+                    with db_cursor(commit=True) as (_conn, c):
+                        c.execute(
+                            """
+                            UPDATE cards
+                            SET next_review=%s,
+                                interval=%s,
+                                ease=%s,
+                                review_count=%s,
+                                lapses=%s,
+                                last_reviewed=%s
+                            WHERE id=%s
+                            """,
+                            (next_review, int(new_interval), float(new_ease), int(revs) + 1, int(new_lapses), today, cid),
+                        )
+
+                    st.session_state.show = False
+                    st.session_state.idx += 1
                     st.rerun()
 
                 c1, c2, c3, c4 = st.columns(4)
@@ -1003,12 +1090,20 @@ if nav == "Review":
                 if st.button("🪄 Generate AI Summary of Missed Concepts"):
                     with st.spinner("Analyzing your weak spots..."):
                         missed_str = "\n".join(st.session_state.missed_content[:15])
-                        prompt = f"As a Pharmacy Professor, summarize these missed concepts into a one-page clinical cheat sheet. Use bullet points and focus on high-yield exam facts:\n{missed_str}"
+                        prompt = (
+                            "As a Pharmacy Professor, summarize these missed concepts into a one-page clinical cheat sheet. "
+                            "Use bullet points and focus on high-yield exam facts:\n"
+                            f"{missed_str}"
+                        )
                         response = flash_model.generate_content(prompt)
-                        st.markdown(f'<div style="background-color:#FFF8E1; padding:20px; border-radius:10px; color:black;">{response.text}</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div style="background-color:#FFF8E1; padding:20px; border-radius:10px; color:black;">{response.text}</div>',
+                            unsafe_allow_html=True,
+                        )
 
             if st.session_state.trouble_lectures:
-                urgent = [v for k, v in st.session_state.trouble_lectures.items() if v["exam_date"] and (v["exam_date"] - today).days <= 14]
+                urgent = [v for v in st.session_state.trouble_lectures.values()
+                          if v["exam_date"] and (v["exam_date"] - today).days <= 14]
                 if urgent:
                     top_trouble = sorted(urgent, key=lambda x: x["count"], reverse=True)[0]
                     st.warning(f"💊 **Lecture Recommendation:** Review **{top_trouble['name']}**.")
@@ -1027,20 +1122,21 @@ if nav == "Review":
 # ------------------------------------------
 elif nav == "Library":
     st.title("📂 Library")
-    conn, c = get_cursor()
 
     tab_browse, tab_upload, tab_manage = st.tabs(["📚 Browse Materials", "☁️ Upload New", "⚙️ Manage"])
 
     with tab_browse:
-        big_query = """
-        SELECT c.name as class_name, e.name as exam_name, e.id as exam_id,
-               l.id as lecture_id, l.name as lecture_name, l.slide_count
-        FROM classes c
-        JOIN exams e ON e.class_id = c.id
-        LEFT JOIN lectures l ON l.exam_id = e.id
-        ORDER BY c.name, e.name, l.name
-        """
-        df = pd.read_sql(big_query, conn)
+        with db_cursor() as (conn, _c):
+            big_query = """
+            SELECT c.name as class_name, e.name as exam_name, e.id as exam_id,
+                   l.id as lecture_id, l.name as lecture_name, l.slide_count
+            FROM classes c
+            JOIN exams e ON e.class_id = c.id
+            LEFT JOIN lectures l ON l.exam_id = e.id
+            ORDER BY c.name, e.name, l.name
+            """
+            df = pd.read_sql(big_query, conn)
+
         if df.empty:
             st.info("Library is empty.")
         else:
@@ -1059,7 +1155,6 @@ elif nav == "Library":
                                     st.button("Open", key=f"op_{lid}", on_click=open_lecture_callback, args=(lid,))
                                 with c3:
                                     if st.button("⚡ AI", key=f"rt_{lid}", help="Retry AI"):
-                                        # Ensure local assets by downloading PDF if needed
                                         try:
                                             ensure_local_assets_for_lecture(lid)
                                         except Exception as e:
@@ -1082,34 +1177,35 @@ elif nav == "Library":
 
                                         st.toast(f"Processing {len(images)} slides...", icon="⚡")
                                         for i in range(0, len(images), 10):
-                                            batch_imgs = images[i:i+10]
-                                            batch_indices = list(range(i, min(i+10, len(images))))
+                                            batch_imgs = images[i:i + 10]
+                                            batch_indices = list(range(i, min(i + 10, len(images))))
                                             new_cards, error = generate_cards_hybrid(lid, batch_indices, batch_imgs, cache, stored_obj, i)
                                             if error:
                                                 st.error(f"AI flashcard note: {error}")
                                             if new_cards:
-                                                conn, c = get_cursor()
-                                                for f, b in new_cards:
-                                                    c.execute(
-                                                        "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
-                                                        (lid, f, b, date.today()),
-                                                    )
-                                                conn.commit()
+                                                with db_cursor(commit=True) as (_conn, c):
+                                                    for f, b in new_cards:
+                                                        c.execute(
+                                                            "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
+                                                            (lid, f, b, date.today()),
+                                                        )
                                         st.rerun()
                         st.divider()
 
     with tab_upload:
-        conn, c = get_cursor()
+        with db_cursor() as (conn, c):
+            c.execute("SELECT id, name FROM classes")
+            classes = c.fetchall()
 
-        c.execute("SELECT id, name FROM classes")
-        classes = c.fetchall()
         if not classes:
             st.warning("Create a Class in 'Manage' tab first!")
         else:
             c_map = {n: i for i, n in classes}
             sel_c = st.selectbox("Select Class", list(c_map.keys()))
-            c.execute("SELECT id, name FROM exams WHERE class_id=%s", (c_map[sel_c],))
-            exams = c.fetchall()
+
+            with db_cursor() as (conn, c):
+                c.execute("SELECT id, name FROM exams WHERE class_id=%s", (c_map[sel_c],))
+                exams = c.fetchall()
 
             with st.expander("➕ Add New Topic"):
                 new_topic = st.text_input("Topic Name")
@@ -1118,11 +1214,11 @@ elif nav == "Library":
                     if not new_topic.strip():
                         st.warning("Topic name cannot be empty.")
                     else:
-                        c.execute(
-                            "INSERT INTO exams (class_id, name, exam_date) VALUES (%s,%s,%s)",
-                            (c_map[sel_c], new_topic.strip(), d_val),
-                        )
-                        conn.commit()
+                        with db_cursor(commit=True) as (_conn, c):
+                            c.execute(
+                                "INSERT INTO exams (class_id, name, exam_date) VALUES (%s,%s,%s)",
+                                (c_map[sel_c], new_topic.strip(), d_val),
+                            )
                         st.rerun()
 
             if exams:
@@ -1136,38 +1232,31 @@ elif nav == "Library":
 
                     for uploaded in uploaded_files:
                         status.write(f"Reading {uploaded.name}...")
-                        conn, c = get_cursor()
-
                         pdf_bytes = uploaded.getvalue()
 
                         # Create lecture row first
-                        c.execute(
-                            "INSERT INTO lectures (exam_id, name, slide_count, pdf_path) VALUES (%s,%s,%s,%s) RETURNING id",
-                            (e_map[sel_e], uploaded.name, 0, None),
-                        )
-                        lid = c.fetchone()[0]
-                        conn.commit()
+                        with db_cursor(commit=True) as (_conn, c):
+                            c.execute(
+                                "INSERT INTO lectures (exam_id, name, slide_count, pdf_path) VALUES (%s,%s,%s,%s) RETURNING id",
+                                (e_map[sel_e], uploaded.name, 0, None),
+                            )
+                            lid = c.fetchone()[0]
 
                         # Upload PDF to Supabase Storage, then store pdf_path
                         try:
                             pdf_path = upload_pdf_to_supabase(lid, pdf_bytes)
-                        except Exception as e:
-                            # cleanup lecture row if upload failed
-                            conn, c = get_cursor()
-                            c.execute("DELETE FROM lectures WHERE id=%s", (lid,))
-                            conn.commit()
+                        except Exception:
+                            with db_cursor(commit=True) as (_conn, c):
+                                c.execute("DELETE FROM lectures WHERE id=%s", (lid,))
                             raise
 
-                        conn, c = get_cursor()
-                        c.execute("UPDATE lectures SET pdf_path=%s WHERE id=%s", (pdf_path, lid))
-                        conn.commit()
+                        with db_cursor(commit=True) as (_conn, c):
+                            c.execute("UPDATE lectures SET pdf_path=%s WHERE id=%s", (pdf_path, lid))
 
-                        # Build ephemeral local slides/cache for processing now
                         images = save_slides_locally_from_pdf_bytes(pdf_bytes, lid, dpi=250)
                         slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
                         cache = build_slide_cache(lid, slide_texts)
 
-                        # Objectives
                         if not (objs and objs.strip()):
                             status.write("Auto-extracting learning objectives...")
                             auto_objs = extract_objectives_from_slide_texts(slide_texts, max_slides=8)
@@ -1178,27 +1267,25 @@ elif nav == "Library":
                             save_objectives(lid, user_list)
                             objectives_input = objs
 
-                        conn, c = get_cursor()
-                        c.execute("UPDATE lectures SET slide_count=%s WHERE id=%s", (len(images), lid))
-                        conn.commit()
+                        with db_cursor(commit=True) as (_conn, c):
+                            c.execute("UPDATE lectures SET slide_count=%s WHERE id=%s", (len(images), lid))
 
                         status.write("Generating Flashcards (high-yield gated)...")
                         for i in range(0, len(images), 10):
-                            batch_imgs = images[i:i+10]
-                            batch_indices = list(range(i, min(i+10, len(images))))
+                            batch_imgs = images[i:i + 10]
+                            batch_indices = list(range(i, min(i + 10, len(images))))
                             new_cards, error = generate_cards_hybrid(lid, batch_indices, batch_imgs, cache, objectives_input, i)
 
                             if error:
                                 status.write(f"AI flashcard note: {error}")
 
                             if new_cards:
-                                conn, c = get_cursor()
-                                for f, b in new_cards:
-                                    c.execute(
-                                        "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
-                                        (lid, f, b, date.today()),
-                                    )
-                                conn.commit()
+                                with db_cursor(commit=True) as (_conn, c):
+                                    for f, b in new_cards:
+                                        c.execute(
+                                            "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
+                                            (lid, f, b, date.today()),
+                                        )
 
                     status.update(label="Complete!", state="complete", expanded=False)
                     st.success("Upload Finished!")
@@ -1206,38 +1293,47 @@ elif nav == "Library":
                     st.rerun()
 
     with tab_manage:
-        conn, c = get_cursor()
-
         new_class = st.text_input("Create New Class Name")
         if st.button("Create Class"):
             if not new_class.strip():
                 st.warning("Class name cannot be empty.")
             else:
-                c.execute("INSERT INTO classes (name) VALUES (%s)", (new_class.strip(),))
-                conn.commit()
+                with db_cursor(commit=True) as (_conn, c):
+                    c.execute("INSERT INTO classes (name) VALUES (%s)", (new_class.strip(),))
                 st.rerun()
 
         st.write("---")
         st.write("🗑️ **Danger Zone**")
-        c.execute("SELECT id, name FROM exams")
-        all_exams = c.fetchall()
+
+        with db_cursor() as (_conn, c):
+            c.execute("SELECT id, name FROM exams")
+            all_exams = c.fetchall()
+
         if all_exams:
             e_del_map = {n: i for i, n in all_exams}
             del_target = st.selectbox("Select Topic to Delete", list(e_del_map.keys()))
             if st.button("Permanently Delete Topic"):
                 eid = e_del_map[del_target]
-                c.execute("SELECT id, pdf_path FROM lectures WHERE exam_id=%s", (eid,))
-                l_rows = c.fetchall()
+
+                with db_cursor() as (_conn, c):
+                    c.execute("SELECT id, pdf_path FROM lectures WHERE exam_id=%s", (eid,))
+                    l_rows = c.fetchall()
 
                 # delete local cache folders
                 for (lid, _pdf_path) in l_rows:
                     shutil.rmtree(os.path.join(SLIDE_DIR, str(lid)), ignore_errors=True)
 
-                # NOTE: we are not deleting PDFs in storage here because that requires elevated permissions
-                # (service role). Keep it as-is or implement scheduled cleanup outside Streamlit.
+                # Optional: attempt storage deletes (only if policies allow)
+                deleted = 0
+                for (_lid, pdf_path) in l_rows:
+                    if pdf_path:
+                        if delete_pdf_from_supabase(pdf_path):
+                            deleted += 1
 
-                c.execute("DELETE FROM exams WHERE id=%s", (eid,))
-                conn.commit()
+                with db_cursor(commit=True) as (_conn, c):
+                    c.execute("DELETE FROM exams WHERE id=%s", (eid,))
+
+                st.toast(f"Deleted topic. PDFs deleted: {deleted}/{len(l_rows)} (depends on storage policies).", icon="🧹")
                 st.rerun()
 
 # ------------------------------------------
@@ -1245,21 +1341,25 @@ elif nav == "Library":
 # ------------------------------------------
 elif nav == "Active Learning":
     st.title("👨‍🏫 Active Learning")
-    conn, c = get_cursor()
 
-    c.execute("SELECT l.id, l.name, e.name FROM lectures l JOIN exams e ON l.exam_id = e.id")
-    all_lecs = c.fetchall()
+    with db_cursor() as (_conn, c):
+        c.execute("SELECT l.id, l.name, e.name FROM lectures l JOIN exams e ON l.exam_id = e.id")
+        all_lecs = c.fetchall()
+
     if not all_lecs:
         st.info("No lectures found.")
     else:
         l_ids = [l[0] for l in all_lecs]
         l_labels = [f"{l[1]} ({l[2]})" for l in all_lecs]
-        default_idx = l_ids.index(st.session_state.active_lecture_id) if "active_lecture_id" in st.session_state and st.session_state.active_lecture_id in l_ids else 0
+        default_idx = (
+            l_ids.index(st.session_state.active_lecture_id)
+            if "active_lecture_id" in st.session_state and st.session_state.active_lecture_id in l_ids
+            else 0
+        )
         sel_label = st.selectbox("Current Lecture", l_labels, index=default_idx)
         lid = l_ids[l_labels.index(sel_label)]
         lec_path = os.path.join(SLIDE_DIR, str(lid))
 
-        # Ensure local assets exist by downloading PDF if needed
         try:
             ensure_local_assets_for_lecture(lid)
         except Exception as e:
@@ -1327,22 +1427,33 @@ elif nav == "Active Learning":
 # ------------------------------------------
 elif nav == "Editor":
     st.title("🛠️ Card Editor")
-    conn, c = get_cursor()
 
-    c.execute("SELECT id, name FROM exams")
-    exams = c.fetchall()
+    with db_cursor() as (conn, c):
+        c.execute("SELECT id, name FROM exams")
+        exams = c.fetchall()
+
     if exams:
         e_map = {name: id for id, name in exams}
         filter_exam = st.selectbox("Topic", list(e_map.keys()))
         eid = e_map[filter_exam]
-        query = "SELECT c.id, c.front, c.back FROM cards c JOIN lectures l ON c.lecture_id = l.id WHERE l.exam_id = %s"
-        df = pd.read_sql(query, conn, params=(eid,))
+
+        with db_cursor() as (conn, _c):
+            query = """
+            SELECT c.id, c.front, c.back
+            FROM cards c
+            JOIN lectures l ON c.lecture_id = l.id
+            WHERE l.exam_id = %s
+            """
+            df = pd.read_sql(query, conn, params=(eid,))
+
         edited = st.data_editor(df, num_rows="dynamic", key="editor", use_container_width=True)
         if st.button("Save Changes", type="primary"):
-            conn, c = get_cursor()
-            for _, row in edited.iterrows():
-                c.execute("UPDATE cards SET front=%s, back=%s WHERE id=%s", (row["front"], row["back"], int(row["id"])))
-            conn.commit()
+            with db_cursor(commit=True) as (_conn, c):
+                for _, row in edited.iterrows():
+                    c.execute(
+                        "UPDATE cards SET front=%s, back=%s WHERE id=%s",
+                        (row["front"], row["back"], int(row["id"])),
+                    )
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")

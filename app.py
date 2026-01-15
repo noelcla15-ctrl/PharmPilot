@@ -27,7 +27,7 @@ IS_CLOUD = running_on_streamlit_cloud()
 # ==========================================
 # ⚙️ CONFIGURATION & THEME ENGINE
 # ==========================================
-st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="centered")
+st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="wide")
 
 LIGHT_THEME = """
 <style>
@@ -1465,6 +1465,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 

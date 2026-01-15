@@ -1227,6 +1227,9 @@ elif nav == "Library":
                 uploaded_files = st.file_uploader("Drop PDFs Here", type="pdf", accept_multiple_files=True)
                 objs = st.text_area("Learning Objectives (optional — auto-extracts if blank)")
 
+                # NEW: Checkbox to control flashcard generation
+                gen_cards = st.checkbox("✨ Auto-generate Flashcards?", value=True, help="Uncheck to just upload the PDF/slides without creating cards yet.")
+
                 if uploaded_files and st.button("🚀 Upload & Process", type="primary"):
                     status = st.status("Processing...", expanded=True)
 
@@ -1270,22 +1273,27 @@ elif nav == "Library":
                         with db_cursor(commit=True) as (_conn, c):
                             c.execute("UPDATE lectures SET slide_count=%s WHERE id=%s", (len(images), lid))
 
-                        status.write("Generating Flashcards (high-yield gated)...")
-                        for i in range(0, len(images), 10):
-                            batch_imgs = images[i:i + 10]
-                            batch_indices = list(range(i, min(i + 10, len(images))))
-                            new_cards, error = generate_cards_hybrid(lid, batch_indices, batch_imgs, cache, objectives_input, i)
+                        # CONDITIONALLY GENERATE CARDS
+                        if gen_cards:
+                            status.write("Generating Flashcards (high-yield gated)...")
+                            for i in range(0, len(images), 10):
+                                batch_imgs = images[i:i + 10]
+                                batch_indices = list(range(i, min(i + 10, len(images))))
+                                new_cards, error = generate_cards_hybrid(lid, batch_indices, batch_imgs, cache, objectives_input, i)
 
-                            if error:
-                                status.write(f"AI flashcard note: {error}")
+                                if error:
+                                    status.write(f"AI flashcard note: {error}")
 
-                            if new_cards:
-                                with db_cursor(commit=True) as (_conn, c):
-                                    for f, b in new_cards:
-                                        c.execute(
-                                            "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
-                                            (lid, f, b, date.today()),
-                                        )
+                                if new_cards:
+                                    with db_cursor(commit=True) as (_conn, c):
+                                        for f, b in new_cards:
+                                            c.execute(
+                                                "INSERT INTO cards (lecture_id, front, back, next_review) VALUES (%s,%s,%s,%s)",
+                                                (lid, f, b, date.today()),
+                                            )
+                        else:
+                            status.write("Skipping Flashcard Generation (Slides & PDF saved).")
+                            time.sleep(1)
 
                     status.update(label="Complete!", state="complete", expanded=False)
                     st.success("Upload Finished!")

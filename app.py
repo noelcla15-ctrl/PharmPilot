@@ -453,6 +453,8 @@ def load_slide_cache(lecture_id: int):
 
 def save_slide_cache(lecture_id: int, cache_obj):
     cache_path = os.path.join(SLIDE_DIR, str(lecture_id), "slide_cache.json")
+    # FIX: Ensure directory exists just in case
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(cache_obj, f, ensure_ascii=False, indent=2)
 
@@ -580,7 +582,7 @@ def ensure_local_assets_for_lecture(lecture_id: int):
     )
 
     if cache is not None and have_pngs:
-        return
+        return cache  # FIX: Return the existing cache
 
     with db_cursor() as (_conn, c):
         c.execute("SELECT pdf_path FROM lectures WHERE id=%s", (lecture_id,))
@@ -591,6 +593,10 @@ def ensure_local_assets_for_lecture(lecture_id: int):
 
     pdf_bytes = download_pdf_from_supabase(pdf_path)
     _ = save_slides_locally_from_pdf_bytes(pdf_bytes, lecture_id, dpi=250)
+    slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
+    
+    # FIX: Return the newly built cache
+    return build_slide_cache(lecture_id, slide_texts)
     slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
     build_slide_cache(lecture_id, slide_texts)
 
@@ -1365,24 +1371,30 @@ elif nav == "Active Learning":
             else 0
         )
         sel_label = st.selectbox("Current Lecture", l_labels, index=default_idx)
+        # ... inside Active Learning block ...
         lid = l_ids[l_labels.index(sel_label)]
         lec_path = os.path.join(SLIDE_DIR, str(lid))
 
         try:
-            ensure_local_assets_for_lecture(lid)
+            # FIX: Capture the returned cache directly
+            cache = ensure_local_assets_for_lecture(lid)
         except Exception as e:
             st.error(str(e))
             st.stop()
 
-        cache = load_slide_cache(lid)
+        # REMOVED: cache = load_slide_cache(lid) 
+        # We don't need to load from disk again; ensure_local_assets returned it.
+
         if not cache:
-            st.error("slide_cache.json missing and could not be rebuilt.")
+            # This now only triggers if the PDF truly had no content to cache
+            st.error("No slides data found (cache is empty). Try re-uploading the lecture.")
             st.stop()
 
         slides = sorted(
             [f for f in os.listdir(lec_path) if f.endswith(".png")],
             key=lambda x: int(x.split("_")[1].split(".")[0]),
         )
+        
         start = st.session_state.read_idx
 
         col_slides, col_tools = st.columns([10, 5])
@@ -1465,7 +1477,6 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
-
 
 
 

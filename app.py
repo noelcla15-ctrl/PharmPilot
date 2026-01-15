@@ -101,8 +101,9 @@ try:
     OPENAI_VISION_MODEL = st.secrets.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
     openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-    # Local Ollama (optional local-first). Force-disable on cloud.
-    OLLAMA_ENABLED = (not IS_CLOUD) and bool(st.secrets.get("OLLAMA_ENABLED", False))
+    # Local Ollama (optional local-first). 
+    # UPDATED: Allow Ollama if enabled in secrets, regardless of cloud/local
+    OLLAMA_ENABLED = bool(st.secrets.get("OLLAMA_ENABLED", False))
     OLLAMA_URL = st.secrets.get("OLLAMA_URL", "http://127.0.0.1:11434")
     OLLAMA_TEXT_MODEL = st.secrets.get("OLLAMA_TEXT_MODEL", "qwen2.5:7b-instruct")
     OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "qwen2.5-vl:7b")
@@ -122,11 +123,10 @@ except Exception:
     )
     st.stop()
 
-# Provider order: local uses Ollama first; cloud skips Ollama entirely
-if IS_CLOUD:
-    PROVIDER_ORDER = ["gemini", "openai"]
-else:
-    PROVIDER_ORDER = ["ollama", "gemini", "openai"]
+# UPDATED: Prefer Cloud APIs (better quality), fallback to Ollama (free/local)
+PROVIDER_ORDER = ["gemini", "openai"]
+if OLLAMA_ENABLED:
+    PROVIDER_ORDER.append("ollama")
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
@@ -595,14 +595,15 @@ def ensure_local_assets_for_lecture(lecture_id: int):
     _ = save_slides_locally_from_pdf_bytes(pdf_bytes, lecture_id, dpi=250)
     slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
     
-    # FIX: Return the newly built cache
-    return build_slide_cache(lecture_id, slide_texts)
-    slide_texts = extract_slide_texts_from_pdf_bytes(pdf_bytes)
-    build_slide_cache(lecture_id, slide_texts)
+    # FIX: Build cache and assign it
+    cache = build_slide_cache(lecture_id, slide_texts)
 
     if not load_objectives(lecture_id):
         auto_objs = extract_objectives_from_slide_texts(slide_texts, max_slides=8)
         save_objectives(lecture_id, auto_objs)
+
+    # FIX: Return the newly built cache
+    return cache
 
 # ==========================================
 # ✅ HIGH-YIELD GATING
@@ -639,13 +640,13 @@ RELEVANT if aligned with objectives and is testable:
 
 Return RAW JSON ONLY:
 [
-  {{
+  {
     "slide": <int>,
     "relevant": true/false,
     "why": "...",
     "key_terms": ["..."],
     "key_points": ["..."]
-  }}
+  }
 ]
 
 SLIDES:
@@ -752,12 +753,12 @@ Target audience: Pharmacy students (NAPLEX level).
 
 Return RAW JSON ONLY:
 [
-  {{
+  {
     "question": "...",
     "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
     "correct_index": 0,
     "explanation": "..."
-  }}
+  }
 ]
 
 SLIDES:
@@ -1371,7 +1372,6 @@ elif nav == "Active Learning":
             else 0
         )
         sel_label = st.selectbox("Current Lecture", l_labels, index=default_idx)
-        # ... inside Active Learning block ...
         lid = l_ids[l_labels.index(sel_label)]
         lec_path = os.path.join(SLIDE_DIR, str(lid))
 
@@ -1477,6 +1477,3 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
-
-
-

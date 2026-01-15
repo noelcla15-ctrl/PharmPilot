@@ -1385,7 +1385,7 @@ elif nav == "Active Learning":
         )
         start = st.session_state.read_idx
 
-        col_slides, col_tools = st.columns([10, 1])
+        col_slides, col_tools = st.columns([4, 2])
         with col_slides:
             end = min(start + 5, len(slides))
             st.caption(f"Slides {start+1}-{end} of {len(slides)}")
@@ -1465,4 +1465,5 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 

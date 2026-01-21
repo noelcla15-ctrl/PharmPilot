@@ -92,7 +92,7 @@ try:
     SUPABASE_PDF_PREFIX = st.secrets.get("SUPABASE_PDF_PREFIX", "lectures")
 
 # ✅ UPDATED PRIORITY: Local First -> Then Cloud Fallback
-PROVIDER_ORDER = []
+    PROVIDER_ORDER = []
 if OLLAMA_ENABLED:
     PROVIDER_ORDER.append("ollama")
 PROVIDER_ORDER.extend(["gemini"])
@@ -1409,4 +1409,5 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 

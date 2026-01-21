@@ -28,6 +28,13 @@ IS_CLOUD = running_on_streamlit_cloud()
 # ⚙️ CONFIGURATION & THEME ENGINE
 # ==========================================
 st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="wide")
+# --- DEBUG BLOCK (Paste near top of file) ---
+try:
+    debug_resp = requests.get("http://127.0.0.1:11434/api/tags", timeout=2)
+    st.success(f"✅ Ollama Connected! Status: {debug_resp.status_code}")
+except Exception as e:
+    st.error(f"❌ Ollama Connection Failed. Reason: {e}")
+# --------------------------------------------
 
 LIGHT_THEME = """
 <style>
@@ -1470,3 +1477,4 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+

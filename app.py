@@ -769,7 +769,8 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
     batch_entries = [cache[i] for i in batch_indices]
     objectives_str = objectives_to_string(objectives_input, lecture_id)
 
-    last_err = None
+    error_log = [] # ✅ NEW: List to track ALL failures
+
     for provider in PROVIDER_ORDER:
         try:
             if provider == "ollama":
@@ -779,7 +780,9 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
                     cards = generate_cards_from_notes(notes, objectives_str, provider="ollama")
                     if cards:
                         return cards, None
-                    last_err = "Ollama produced no cards."
+                    error_log.append("Ollama: Generated 0 cards (possible parsing issue)")
+                else:
+                    error_log.append("Ollama: Disabled or Unreachable")
 
             elif provider == "gemini":
                 hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini")
@@ -787,7 +790,7 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
                 cards = generate_cards_from_notes(notes, objectives_str, provider="gemini")
                 if cards:
                     return cards, None
-                last_err = "Gemini produced no cards."
+                error_log.append("Gemini: Generated 0 cards")
 
             elif provider == "openai":
                 if openai_client:
@@ -796,14 +799,16 @@ def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, object
                     cards = generate_cards_from_notes(notes, objectives_str, provider="openai")
                     if cards:
                         return cards, None
-                    last_err = "OpenAI produced no cards."
+                    error_log.append("OpenAI: Generated 0 cards")
                 else:
-                    last_err = "OpenAI not configured."
+                    error_log.append("OpenAI: Not Configured")
 
         except Exception as e:
-            last_err = f"{provider} failed: {e}"
+            # ✅ NEW: Capture the specific error message for this provider
+            error_log.append(f"{provider} Error: {str(e)}")
 
-    return [], f"All providers failed or returned no cards. Last: {last_err}"
+    # Return the full log so we can see the Ollama error
+    return [], " | ".join(error_log)
 
 def generate_quiz_hybrid(lecture_id, batch_indices, batch_images, cache):
     cache = ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
@@ -1466,3 +1471,4 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+

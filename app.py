@@ -643,6 +643,7 @@ def build_slides_blob(batch_entries, start_idx):
 def extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini"):
     slides_blob = build_slides_blob(batch_entries, start_idx)
 
+    # ✅ FIX: Doubled braces {{ }} for the JSON example, single { } for variables
     prompt = f"""
 You are a strict pharmacy exam content curator.
 
@@ -663,13 +664,13 @@ RELEVANT if aligned with objectives and is testable:
 
 Return RAW JSON ONLY:
 [
-  {
+  {{
     "slide": <int>,
     "relevant": true/false,
     "why": "...",
     "key_terms": ["..."],
     "key_points": ["..."]
-  }
+  }}
 ]
 
 SLIDES:
@@ -770,18 +771,20 @@ Structure: [ { "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) 
 
 def generate_quiz_local_textfirst(batch_entries):
     slides_blob = build_slides_blob(batch_entries, start_idx=0)
+    
+    # ✅ FIX: Doubled braces {{ }} for the JSON example
     prompt = f"""
 Create a 5-question multiple choice quiz based on these slides.
 Target audience: Pharmacy students (NAPLEX level).
 
 Return RAW JSON ONLY:
 [
-  {
+  {{
     "question": "...",
     "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
     "correct_index": 0,
     "explanation": "..."
-  }
+  }}
 ]
 
 SLIDES:
@@ -1500,6 +1503,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 

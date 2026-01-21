@@ -15,6 +15,7 @@ import base64
 from io import BytesIO
 from openai import OpenAI
 from contextlib import contextmanager
+import re 
 
 # ==========================================
 # ✅ ENV DETECTION + PROVIDER ORDER
@@ -114,10 +115,9 @@ if OLLAMA_ENABLED:
     PROVIDER_ORDER.append("ollama")
 PROVIDER_ORDER.extend(["gemini", "openai"])
 
-# ✅ GEMINI 2.5 CONFIGURATION
+# ✅ GEMINI CONFIG & QUOTA HOPPING
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# 2.5 models are strict; we must explicitly disable filters for medical study content
 safety_settings = {
     "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
     "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -125,10 +125,46 @@ safety_settings = {
     "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
 }
 
-# Using your preferred 2.5 model (Stable release)
-# Note: If 2.5 continues to fail, try "gemini-3-flash" (Dec 2025 release)
-flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
+# The quiz model can remain the older stable pro
 quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
+
+# 📋 QUOTA HOPPING LIST (Best/Cheapest -> Newest/Fallback)
+GEMINI_MODELS_TO_TRY = [
+    "gemini-2.5-flash-lite",  # Tier 1: Most efficient
+    "gemini-2.5-flash",       # Tier 2: Standard
+    "gemini-3-flash",         # Tier 3: Fresh quota backup
+    "gemini-1.5-flash"        # Tier 4: Older reliable backup
+]
+
+# ==========================================
+# ⚡ GEMINI SAFE CALLER (Quota Hopping)
+# ==========================================
+def call_gemini_safe(prompt_text, payload_name):
+    """
+    Tries multiple Gemini models. If one hits a rate limit, it swaps to the next.
+    """
+    last_error = None
+    for model_name in GEMINI_MODELS_TO_TRY:
+        try:
+            model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
+            response = model.generate_content(prompt_text)
+            
+            if not response.candidates or not response.candidates[0].content.parts:
+                continue
+
+            data = parse_json_response(response.text, payload_name)
+            if isinstance(data, list) and data: return data
+            if isinstance(data, dict) and data: return data
+                
+        except Exception as e:
+            if "429" in str(e) or "ResourceExhausted" in str(e):
+                print(f"⚠️ Quota Limit on {model_name}. Switching...")
+                last_error = e
+                continue
+            last_error = e
+            continue
+
+    raise last_error if last_error else RuntimeError("All Gemini models failed.")
 
 SLIDE_DIR = "lecture_slides"
 os.makedirs(SLIDE_DIR, exist_ok=True)
@@ -138,8 +174,18 @@ os.makedirs(SLIDE_DIR, exist_ok=True)
 import re
 
 def parse_json_response(response_text, payload_name):
-    if not response_text:
-        return []
+    if not response_text: return []
+    text = response_text.replace("```json", "").replace("```", "").strip()
+    try: return json.loads(text)
+    except: pass
+    # Regex Rescue
+    try:
+        match_list = re.search(r'\[.*\]', text, re.DOTALL)
+        if match_list: return json.loads(match_list.group())
+        match_obj = re.search(r'\{.*\}', text, re.DOTALL)
+        if match_obj: return json.loads(match_obj.group())
+    except: pass
+    return []
     
     # 1. Strip markdown code blocks
     text = response_text.replace("```json", "").replace("```", "").strip()
@@ -640,139 +686,142 @@ def build_slides_blob(batch_entries, start_idx):
         parts.append(f"--- Slide {slide_no} ---\nTEXT:\n{txt}\n\nIMAGE_NOTES:\n{img_notes}".strip())
     return "\n\n".join(parts)
 
+# ==========================================
+# ✅ GENERATION LOGIC (Ollama -> Critic -> Gemini)
+# ==========================================
+def build_slides_blob(batch_entries, start_idx):
+    return "\n\n".join([f"--- Slide {start_idx+k+1} ---\nTEXT:\n{e.get('text','')}\nIMG:\n{e.get('image_notes','')}" for k,e in enumerate(batch_entries)])
+
 def extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini"):
     slides_blob = build_slides_blob(batch_entries, start_idx)
-
-    # ✅ FIX: Doubled braces {{ }} for the JSON example, single { } for variables
+    # ✅ FIX: Double braces {{ }} prevents f-string crashes
     prompt = f"""
-You are a strict pharmacy exam content curator.
-
-OBJECTIVES (use these to decide relevance):
-{objectives_str}
-
-HARD EXCLUSIONS (mark NOT relevant if mostly these):
-- instructor contact info, emails, phone numbers, office hours
-- class logistics, dates, assignments, citations/references pages
-- admin content, generic background, filler
-- isolated trivia numbers unless explicitly objective-relevant
-
-RELEVANT if aligned with objectives and is testable:
-- definitions, formulas, decision rules
-- key comparisons
-- drugs (MOA/uses/AE/contraindications/pearls)
-- model mechanics (states, transitions, costs, probabilities)
-
-Return RAW JSON ONLY:
-[
-  {{
-    "slide": <int>,
-    "relevant": true/false,
-    "why": "...",
-    "key_terms": ["..."],
-    "key_points": ["..."]
-  }}
-]
-
+Pharmacy content curator. OBJECTIVES: {objectives_str}
+Rules: EXCLUDE admin/logistics. INCLUDE definitions, drugs, formulas.
+Return RAW JSON:
+[ {{ "slide": <int>, "relevant": true, "key_points": ["..."] }} ]
 SLIDES:
 {slides_blob}
 """.strip()
-
+    
     if provider == "ollama":
-        resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.1, timeout=180)
-        data = parse_json_response(resp, "high_yield")
-        return data if isinstance(data, list) else []
+        resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.1)
+        return parse_json_response(resp, "high_yield")
+    if provider == "gemini":
+        return call_gemini_safe(prompt, "high_yield")
     if provider == "openai":
-        resp = openai_generate_text(prompt, model=OPENAI_TEXT_MODEL, timeout=180)
-        data = parse_json_response(resp, "high_yield")
-        return data if isinstance(data, list) else []
-
-    resp = flash_model.generate_content(prompt)
-    data = parse_json_response(resp.text, "high_yield")
-    return data if isinstance(data, list) else []
+        resp = openai_generate_text(prompt, model=OPENAI_TEXT_MODEL)
+        return parse_json_response(resp, "high_yield")
+    return []
 
 def condensed_notes_from_high_yield(high_yield_items):
     condensed = []
-    for item in high_yield_items:
-        if not isinstance(item, dict):
-            continue
-        if not item.get("relevant"):
-            continue
-        kp = item.get("key_points") or []
-        kt = item.get("key_terms") or []
-        slide_no = item.get("slide")
-        if kp:
-            condensed.append(f"Slide {slide_no}:\nKEY_TERMS: {kt}\nKEY_POINTS:\n- " + "\n- ".join(kp))
-    return "\n\n".join(condensed).strip()
+    for item in (high_yield_items or []):
+        if isinstance(item, dict) and item.get("relevant"):
+            condensed.append(f"Slide {item.get('slide')}:\nPOINTS: " + "\n".join(item.get("key_points", [])))
+    return "\n\n".join(condensed)
 
 def generate_cards_from_notes(notes_blob, objectives_str, provider="gemini"):
-    if not notes_blob:
-        return []
-
+    if not notes_blob: return []
+    # ✅ FIX: Double braces {{ }} 
     prompt = f"""
-You are a Pharmacy Professor writing exam-grade flashcards.
-
-OBJECTIVES:
-{objectives_str}
-
-ONLY use the curated HIGH-YIELD NOTES below. Do NOT invent facts.
-Make cards primarily in these styles:
-- Definitions / distinctions
-- Formulas / interpretation
-- Model mechanics
-- Drug facts (MOA, indications, major adverse effects, pearls)
-
-Avoid:
-- instructor contact info, emails, logistics
-- trivial stats unless clearly objective-relevant
-
-Return RAW JSON ONLY:
-[{{"front":"...","back":"..."}}]
-
-HIGH-YIELD NOTES:
+Pharmacy Professor. Write NAPLEX flashcards based on notes.
+OBJECTIVES: {objectives_str}
+Return RAW JSON: [{{{{ "front": "...", "back": "..." }}}}]
+NOTES:
 {notes_blob}
 """.strip()
 
     if provider == "ollama":
-        resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.2, timeout=180)
-        data = parse_json_response(resp, "flashcards")
-        if isinstance(data, list):
-            return [(x["front"], x["back"]) for x in data if isinstance(x, dict) and "front" in x and "back" in x]
-        return []
+        resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.2)
+        data = parse_json_response(resp, "cards")
+    elif provider == "gemini":
+        data = call_gemini_safe(prompt, "cards")
+    elif provider == "openai":
+        resp = openai_generate_text(prompt, model=OPENAI_TEXT_MODEL)
+        data = parse_json_response(resp, "cards")
+    else: data = []
 
-    if provider == "openai":
-        resp = openai_generate_text(prompt, model=OPENAI_TEXT_MODEL, timeout=180)
-        data = parse_json_response(resp, "flashcards")
-        if isinstance(data, list):
-            return [(x["front"], x["back"]) for x in data if isinstance(x, dict) and "front" in x and "back" in x]
-        return []
-
-    resp = flash_model.generate_content(prompt)
-    data = parse_json_response(resp.text, "flashcards")
     if isinstance(data, list):
-        return [(x["front"], x["back"]) for x in data if isinstance(x, dict) and "front" in x and "back" in x]
+        return [(x["front"], x["back"]) for x in data if "front" in x and "back" in x]
     return []
 
-# ==========================================
-# ☁️ GEMINI QUIZ
-# ==========================================
-def generate_interactive_quiz_gemini(images):
-    prompt = """
-Create a 5-question multiple choice quiz based on these slides.
-Target Audience: Pharmacy Students (NAPLEX level).
-IMPORTANT: Return ONLY a JSON list. Do not use Markdown blocks.
-Structure: [ { "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "correct_index": 0, "explanation": "..." } ]
+def verify_cards_quality(cards, objectives_str):
+    if not cards: return False, "No cards."
+    cards_text = "\n".join([f"Q: {f}\nA: {b}" for f, b in cards])
+    prompt = f"""
+Grade these pharmacy flashcards.
+OBJECTIVES: {objectives_str}
+CRITERIA: Accurate? Comprehensive? Not vague?
+Return RAW JSON: {{ "pass": true/false, "critique": "..." }}
+CARDS:
+{cards_text}
 """
     try:
-        content = [prompt] + images
-        response = quiz_model.generate_content(content)
-        return parse_json_response(response.text, "quiz")
-    except Exception as e:
-        return [{"error": str(e)}]
+        resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.1)
+        data = parse_json_response(resp, "verify")
+        return data.get("pass", False), data.get("critique", "Fail")
+    except: return True, "Error"
+
+def improve_cards(cards, feedback, objectives_str, provider="gemini"):
+    cards_text = "\n".join([f"Q: {f}\nA: {b}" for f, b in cards])
+    prompt = f"""
+Editor. Fix rejected cards based on FEEDBACK: {feedback}
+OBJECTIVES: {objectives_str}
+ORIGINAL:
+{cards_text}
+Return RAW JSON: [{{ "front": "...", "back": "..." }}]
+"""
+    try:
+        if provider == "gemini": data = call_gemini_safe(prompt, "improve")
+        else:
+            resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.3)
+            data = parse_json_response(resp, "improve")
+        
+        if isinstance(data, list): return [(x["front"], x["back"]) for x in data if "front" in x]
+    except: pass
+    return []
+
+def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, objectives_input, start_idx):
+    cache = ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
+    batch_entries = [cache[i] for i in batch_indices]
+    objectives_str = objectives_to_string(objectives_input, lecture_id)
+
+    # 1. GENERATE (Ollama)
+    cards = []
+    if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
+        try:
+            hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="ollama")
+            notes = condensed_notes_from_high_yield(hy)
+            cards = generate_cards_from_notes(notes, objectives_str, provider="ollama")
+        except Exception as e: print(f"Ollama gen failed: {e}")
+
+    # Fallback to Gemini if Ollama made nothing
+    if not cards:
+        try:
+            hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini")
+            notes = condensed_notes_from_high_yield(hy)
+            cards = generate_cards_from_notes(notes, objectives_str, provider="gemini")
+            if cards: return cards, None # Trust Gemini
+        except: return [], "Generation failed."
+
+    # 2. VERIFY (Ollama Critic)
+    is_good, critique = verify_cards_quality(cards, objectives_str)
+    if is_good: return cards, None
+
+    # 3. IMPROVE (Gemini -> Ollama)
+    print(f"Cards rejected: {critique}")
+    improved = improve_cards(cards, critique, objectives_str, provider="gemini")
+    if improved: return improved, f"Fixed by Gemini. ({critique})"
+    
+    improved = improve_cards(cards, critique, objectives_str, provider="ollama")
+    if improved: return improved, f"Fixed by Ollama. ({critique})"
+
+    return cards, f"Quality Low. ({critique})"
 
 def generate_quiz_local_textfirst(batch_entries):
     slides_blob = build_slides_blob(batch_entries, start_idx=0)
-    
-    # ✅ FIX: Doubled braces {{ }} for the JSON example
+    # ✅ FIX: Double braces {{ }}
     prompt = f"""
 Create a 5-question multiple choice quiz based on these slides.
 Target audience: Pharmacy students (NAPLEX level).
@@ -792,85 +841,6 @@ SLIDES:
 """.strip()
     resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.2, timeout=180)
     return parse_json_response(resp, "quiz")
-
-# ==========================================
-# 🧠 HYBRID WRAPPERS
-# ==========================================
-def generate_cards_hybrid(lecture_id, batch_indices, batch_images, cache, objectives_input, start_idx):
-    cache = ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
-    batch_entries = [cache[i] for i in batch_indices]
-    objectives_str = objectives_to_string(objectives_input, lecture_id)
-
-    last_err = None
-    for provider in PROVIDER_ORDER:
-        try:
-            if provider == "ollama":
-                if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
-                    hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="ollama")
-                    notes = condensed_notes_from_high_yield(hy)
-                    cards = generate_cards_from_notes(notes, objectives_str, provider="ollama")
-                    if cards:
-                        return cards, None
-                    last_err = "Ollama produced no cards."
-
-            elif provider == "gemini":
-                hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini")
-                notes = condensed_notes_from_high_yield(hy)
-                cards = generate_cards_from_notes(notes, objectives_str, provider="gemini")
-                if cards:
-                    return cards, None
-                last_err = "Gemini produced no cards."
-
-            elif provider == "openai":
-                if openai_client:
-                    hy = extract_high_yield(batch_entries, objectives_str, start_idx, provider="openai")
-                    notes = condensed_notes_from_high_yield(hy)
-                    cards = generate_cards_from_notes(notes, objectives_str, provider="openai")
-                    if cards:
-                        return cards, None
-                    last_err = "OpenAI produced no cards."
-                else:
-                    last_err = "OpenAI not configured."
-
-        except Exception as e:
-            last_err = f"{provider} failed: {e}"
-
-    return [], f"All providers failed or returned no cards. Last: {last_err}"
-
-def generate_quiz_hybrid(lecture_id, batch_indices, batch_images, cache):
-    cache = ensure_image_notes_for_batch(lecture_id, batch_indices, batch_images, cache)
-    batch_entries = [cache[i] for i in batch_indices]
-
-    last_err = None
-    for provider in PROVIDER_ORDER:
-        try:
-            if provider == "ollama":
-                if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
-                    return generate_quiz_local_textfirst(batch_entries)
-                last_err = "Ollama disabled/unreachable."
-
-            elif provider == "gemini":
-                q = generate_interactive_quiz_gemini(batch_images)
-                if isinstance(q, list) and q and isinstance(q[0], dict) and "error" not in q[0]:
-                    return q
-                last_err = f"Gemini quiz error: {q[0].get('error') if isinstance(q, list) and q else 'unknown'}"
-
-            elif provider == "openai":
-                if openai_client:
-                    prompt = """
-Create a 5-question multiple choice quiz based on these slides.
-Target Audience: Pharmacy Students (NAPLEX level).
-IMPORTANT: Return ONLY a JSON list. Do not use Markdown blocks.
-Structure: [ { "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "correct_index": 0, "explanation": "..." } ]
-""".strip()
-                    resp_text = openai_generate_vision(prompt, batch_images, model=OPENAI_VISION_MODEL)
-                    return parse_json_response(resp_text, "quiz")
-                last_err = "OpenAI not configured."
-
-        except Exception as e:
-            last_err = f"{provider} failed: {e}"
-
-    return [{"error": f"All providers failed. Last: {last_err}"}]
 
 # ==========================================
 # ✅ SPACED REPETITION OVERHAUL (exam-aware SM-2-ish)
@@ -965,63 +935,52 @@ def open_lecture_callback(lid):
 if nav == "Review":
     st.title("🧠 Study Center")
     today = date.today()
+    
+    # ✅ NEW: Slider in Sidebar
+    st.sidebar.markdown("### ⚙️ Settings")
+    session_limit = st.sidebar.number_input("Session Limit", 10, 500, 50, 10)
 
-    if "session_active" not in st.session_state:
-        st.session_state.session_active = False
-    if "streak" not in st.session_state:
-        st.session_state.streak = 0
-    if "last_completion_date" not in st.session_state:
-        st.session_state.last_completion_date = None
-    if "missed_content" not in st.session_state:
-        st.session_state.missed_content = []
+    if "session_active" not in st.session_state: st.session_state.session_active = False
+    if "streak" not in st.session_state: st.session_state.streak = 0
+    if "last_completion_date" not in st.session_state: st.session_state.last_completion_date = None
+    if "missed_content" not in st.session_state: st.session_state.missed_content = []
 
     with db_cursor() as (conn, c):
+        # ✅ NEW QUERY: Sorted by Exam Date Priority
         c.execute("""
-            SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, c.lapses,
-                   l.id, l.name, e.exam_date, e.name, e.id
-            FROM cards c
-            JOIN lectures l ON c.lecture_id = l.id
-            JOIN exams e ON l.exam_id = e.id
-            WHERE c.next_review <= %s
-            ORDER BY c.next_review ASC LIMIT 50
-        """, (today,))
+            SELECT c.id, c.front, c.back, c.interval, c.ease, c.review_count, c.lapses, l.id, l.name, e.exam_date, e.name, e.id
+            FROM cards c JOIN lectures l ON c.lecture_id = l.id JOIN exams e ON l.exam_id = e.id
+            WHERE c.next_review <= %s ORDER BY e.exam_date ASC NULLS LAST, c.next_review ASC LIMIT %s
+        """, (today, session_limit))
         cards_due = c.fetchall()
-
+        
+        # ✅ NEW: Total Pending Count
+        c.execute("SELECT COUNT(*) FROM cards WHERE next_review <= %s", (today,))
+        total_pending = c.fetchone()[0]
+        
         c.execute("SELECT name, exam_date FROM exams WHERE exam_date >= %s ORDER BY exam_date ASC LIMIT 1", (today,))
         next_ex = c.fetchone()
 
-    if not st.session_state.session_active:
+   if not st.session_state.session_active:
         if not cards_due:
-            st.balloons()
-            st.success("🎉 All caught up for today!")
-            st.metric("🔥 Current Streak", f"{st.session_state.streak} Days")
+            st.balloons(); st.success("All caught up!")
+            st.metric("🔥 Streak", f"{st.session_state.streak} Days")
         else:
             total_due = len(cards_due)
-
-            st.markdown("### 📊 Session Overview")
             col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Cards Due", total_due)
+            # ✅ NEW: Shows "50 / 150"
+            col1.metric("Cards", f"{total_due} / {total_pending}")
+            
             with col2:
-                if next_ex:
-                    days_left = (next_ex[1] - today).days
-                    st.metric("Next Exam", f"{days_left} Days", next_ex[0])
-                else:
-                    st.metric("Next Exam", "None Set")
-            with col3:
-                avg_speed = 10 if "global_avg_speed" not in st.session_state else st.session_state.global_avg_speed
-                st.metric("Est. Time", f"~{int(total_due * avg_speed // 60)} min")
-            with col4:
-                st.metric("🔥 Streak", f"{st.session_state.streak} Days")
-
+                if next_ex: st.metric("Next Exam", f"{(next_ex[1]-today).days} Days", next_ex[0])
+                else: st.metric("Next Exam", "None")
+            
+            col3.metric("Est. Time", f"~{int(total_due*10//60)} min")
+            col4.metric("Streak", f"{st.session_state.streak} Days")
+            
             st.markdown("---")
             if st.button("🚀 Start Review Session", type="primary", use_container_width=True):
-                st.session_state.session_active = True
-                st.session_state.idx = 0
-                st.session_state.total_seconds = 0
-                st.session_state.trouble_lectures = {}
-                st.session_state.missed_content = []
-                st.session_state.session_start_time = time.time()
+                st.session_state.update({"session_active":True, "idx":0, "total_seconds":0, "trouble_lectures":{}, "missed_content":[], "session_start_time":time.time()})
                 st.rerun()
 
     else:
@@ -1503,6 +1462,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 

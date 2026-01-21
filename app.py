@@ -102,7 +102,7 @@ try:
     OLLAMA_ENABLED = bool(st.secrets.get("OLLAMA_ENABLED", True))  # Default True for you
     OLLAMA_URL = st.secrets.get("OLLAMA_URL", "http://127.0.0.1:11434")
     OLLAMA_TEXT_MODEL = st.secrets.get("OLLAMA_TEXT_MODEL", "qwen2.5:7b-instruct")
-    OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "qwen2.5-vl:7b")
+    OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
 
 except Exception:
     st.error("Missing Secrets! Check .streamlit/secrets.toml")
@@ -1500,5 +1500,6 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 

@@ -134,7 +134,7 @@ safety_settings = {
 
 # ✅ Correct model names
 flash_model = genai.GenerativeModel("gemini-3-flash", safety_settings=safety_settings)
-quiz_model = genai.GenerativeModel("gemini-2.5-flash-tts", safety_settings=safety_settings)
+quiz_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
 
 # Fix Ollama connectivity check
 def ollama_is_up(ollama_url: str) -> bool:
@@ -1535,6 +1535,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 

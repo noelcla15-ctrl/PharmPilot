@@ -132,13 +132,115 @@ safety_settings = {
     "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
 }
 
-# ✅ SWITCHED TO GEMINI 3 FLASH (To fix Rate Limits)
-# If 3-flash is not available in your region, revert to "gemini-1.5-flash"
-flash_model = genai.GenerativeModel("gemini-3-flash", safety_settings=safety_settings)
-quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
+# ✅ Correct model names
+flash_model = genai.GenerativeModel("gemini-1.5-flash", safety_settings=safety_settings)
+quiz_model = genai.GenerativeModel("gemini-1.5-pro", safety_settings=safety_settings)
 
-SLIDE_DIR = "lecture_slides"
-os.makedirs(SLIDE_DIR, exist_ok=True)
+# Fix Ollama connectivity check
+def ollama_is_up(ollama_url: str) -> bool:
+    try:
+        r = requests.get(f"{ollama_url}/api/tags", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+# Fix provider fallback logic
+def extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini"):
+    slides_blob = build_slides_blob(batch_entries, start_idx)
+    
+    prompt = f"""
+    You are a strict pharmacy exam content curator.
+
+    OBJECTIVES (use these to decide relevance):
+    {objectives_str}
+
+    HARD EXCLUSIONS (mark NOT relevant if mostly these):
+    - instructor contact info, emails, phone numbers, office hours
+    - class logistics, dates, assignments, citations/references pages
+    - admin content, generic background, filler
+    - isolated trivia numbers unless explicitly objective-relevant
+
+    RELEVANT if aligned with objectives and is testable:
+    - definitions, formulas, decision rules
+    - key comparisons
+    - drug facts (MOA/uses/AE/contraindications/pearls)
+    - model mechanics (states, transitions, costs, probabilities)
+
+    Return RAW JSON ONLY:
+    {{
+        "slide": <int>,
+        "relevant": true/false,
+        "why": "...",
+        "key_terms": ["..."],
+        "key_points": ["..."]
+    }}
+
+    SLIDES:
+    {slides_blob}
+    """
+    
+    try:
+        if provider == "ollama":
+            if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
+                resp = ollama_generate_text(prompt, model=OLLAMA_TEXT_MODEL, temperature=0.2, timeout=180)
+                data = parse_json_response(resp, "high_yield")
+                return data if isinstance(data, list) else []
+        
+        elif provider == "gemini":  # This should be your primary reliable provider
+            response = flash_model.generate_content(prompt)
+            data = parse_json_response(response.text, "high_yield")
+            return data if isinstance(data, list) else []
+            
+        elif provider == "openai":
+            if openai_client:
+                resp = openai_generate_text(prompt, model=OPENAI_TEXT_MODEL, temperature=0.2, timeout=180)
+                data = parse_json_response(resp, "high_yield")
+                return data if isinstance(data, list) else []
+                
+    except Exception as e:
+        st.error(f"{provider} Error: {str(e)}")
+    
+    return []  # Return empty list if all providers fail
+
+# Fix the provider order logic
+PROVIDER_ORDER = ["gemini"]  # Primary reliable provider
+if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL):
+    PROVIDER_ORDER.append("ollama")
+if openai_client:  # Only add OpenAI if properly configured
+    PROVIDER_ORDER.append("openai")
+
+# Add debugging information
+st.sidebar.markdown("### 🔧 Debug Info")
+st.sidebar.write(f"Ollama: {'✅ Connected' if OLLAMA_ENABLED and ollama_is_up(OLLAMA_URL) else '❌ Disabled'}")
+st.sidebar.write(f"Gemini: {'✅ Configured' if hasattr(flash_model, 'generate_content') else '❌ Check API Key'}")
+st.sidebar.write(f"OpenAI: {'✅ Configured' if openai_client else '❌ Not configured'}")
+
+# Test the connection
+if st.sidebar.button("Test Providers"):
+    with st.sidebar:
+        with st.expander("Connection Test Results"):
+            # Test Gemini
+            try:
+                test_response = flash_model.generate_content("Say 'OK' in JSON format: {'status': 'ok'}")
+                st.write("Gemini: ✅ Connected")
+            except Exception as e:
+                st.write(f"Gemini: ❌ {str(e)}")
+            
+            # Test Ollama
+            if OLLAMA_ENABLED:
+                try:
+                    r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+                    st.write(f"Ollama: ✅ Connected (Models: {len(r.json().get('models', []))})")
+                except Exception as e:
+                    st.write(f"Ollama: ❌ {str(e)}")
+# Test the actual flashcard generation
+if st.button("Debug Flashcard Generation"):
+    test_entries = [{"text": "Sample slide content about pharmacokinetics."}]
+    test_objectives = "Understand drug metabolism and elimination pathways"
+    
+    results = extract_high_yield(test_entries, test_objectives, 0, provider="gemini")
+    st.write("Generation Results:", results)
+
 
 # ==========================================
 # 🧠 ROBUST JSON PARSER (Fixes AI "Chatter")
@@ -1433,6 +1535,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 

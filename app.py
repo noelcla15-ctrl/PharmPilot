@@ -28,13 +28,6 @@ IS_CLOUD = running_on_streamlit_cloud()
 # ⚙️ CONFIGURATION & THEME ENGINE
 # ==========================================
 st.set_page_config(page_title="PharmPilot", page_icon="💊", layout="wide")
-# --- DEBUG BLOCK (Paste near top of file) ---
-try:
-    debug_resp = requests.get("http://127.0.0.1:11434/api/tags", timeout=2)
-    st.success(f"✅ Ollama Connected! Status: {debug_resp.status_code}")
-except Exception as e:
-    st.error(f"❌ Ollama Connection Failed. Reason: {e}")
-# --------------------------------------------
 
 LIGHT_THEME = """
 <style>
@@ -132,8 +125,9 @@ safety_settings = {
     "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
 }
 
-# ✅ SWITCHED TO GEMINI 2.5 FLASH (Stable Version)
-flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
+# ✅ SWITCHED TO GEMINI 3 FLASH (To fix Rate Limits)
+# If 3-flash is not available in your region, revert to "gemini-1.5-flash"
+flash_model = genai.GenerativeModel("gemini-3-flash", safety_settings=safety_settings)
 quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
 
 SLIDE_DIR = "lecture_slides"
@@ -1477,4 +1471,3 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
-

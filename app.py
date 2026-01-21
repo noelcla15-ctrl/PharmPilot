@@ -85,64 +85,85 @@ st.sidebar.markdown("---")
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     DB_URL = st.secrets["SUPABASE_DB_URL"]
-
-    # Supabase Storage (PDF-only)
+    
+    # ... (Supabase secrets remain the same) ...
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
     SUPABASE_BUCKET = st.secrets.get("SUPABASE_STORAGE_BUCKET", "pharmpilot")
-    SUPABASE_PDF_PREFIX = st.secrets.get("SUPABASE_PDF_PREFIX", "lectures")  # folder inside bucket
-
-    # Optional: retention (days) for PDFs in storage (only works if your storage policies allow anon deletes)
-    PDF_RETENTION_DAYS = int(st.secrets.get("PDF_RETENTION_DAYS", 30))
-
+    SUPABASE_PDF_PREFIX = st.secrets.get("SUPABASE_PDF_PREFIX", "lectures")
+    
     # OpenAI fallback
     OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
     OPENAI_TEXT_MODEL = st.secrets.get("OPENAI_TEXT_MODEL", "gpt-4o-mini")
     OPENAI_VISION_MODEL = st.secrets.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
     openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-    # Local Ollama (optional local-first). 
-    # UPDATED: Allow Ollama if enabled in secrets, regardless of cloud/local
-    OLLAMA_ENABLED = bool(st.secrets.get("OLLAMA_ENABLED", False))
+    # Local Ollama
+    OLLAMA_ENABLED = bool(st.secrets.get("OLLAMA_ENABLED", True))  # Default True for you
     OLLAMA_URL = st.secrets.get("OLLAMA_URL", "http://127.0.0.1:11434")
     OLLAMA_TEXT_MODEL = st.secrets.get("OLLAMA_TEXT_MODEL", "qwen2.5:7b-instruct")
     OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "qwen2.5-vl:7b")
 
 except Exception:
-    st.error(
-        "Missing Secrets! Ensure Streamlit secrets are set.\n\n"
-        "Required:\n"
-        "- GOOGLE_API_KEY\n"
-        "- SUPABASE_DB_URL\n"
-        "- SUPABASE_URL\n"
-        "- SUPABASE_ANON_KEY\n"
-        "Optional:\n"
-        "- SUPABASE_STORAGE_BUCKET (default: pharmpilot)\n"
-        "- SUPABASE_PDF_PREFIX (default: lectures)\n"
-        "- PDF_RETENTION_DAYS (default: 30)\n"
-    )
+    st.error("Missing Secrets! Check .streamlit/secrets.toml")
     st.stop()
 
-# UPDATED: Prefer Cloud APIs (better quality), fallback to Ollama (free/local)
-PROVIDER_ORDER = ["gemini", "openai"]
+# ✅ UPDATED PRIORITY: Local First -> Then Cloud Fallback
+PROVIDER_ORDER = []
 if OLLAMA_ENABLED:
     PROVIDER_ORDER.append("ollama")
+PROVIDER_ORDER.extend(["gemini", "openai"])
 
+# ✅ GEMINI 2.5 CONFIGURATION
 genai.configure(api_key=GOOGLE_API_KEY)
 
-safety_settings = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-]
+# 2.5 models are strict; we must explicitly disable filters for medical study content
+safety_settings = {
+    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+}
 
+# Using your preferred 2.5 model (Stable release)
+# Note: If 2.5 continues to fail, try "gemini-3-flash" (Dec 2025 release)
 flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
 quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
 
-# Local ephemeral cache dir
-SLIDE_DIR = "lecture_slides"
-os.makedirs(SLIDE_DIR, exist_ok=True)
+# ==========================================
+# 🧠 ROBUST JSON PARSER (Fixes AI "Chatter")
+# ==========================================
+import re
+
+def parse_json_response(response_text, payload_name):
+    if not response_text:
+        return []
+    
+    # 1. Strip markdown code blocks
+    text = response_text.replace("```json", "").replace("```", "").strip()
+    
+    # 2. Naive attempt
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Regex Rescue: Find the largest JSON list [...] or object {...}
+    # This ignores "Here is your JSON:" intros that AI loves to add
+    try:
+        match_list = re.search(r'\[.*\]', text, re.DOTALL)
+        if match_list:
+            return json.loads(match_list.group())
+            
+        match_obj = re.search(r'\{.*\}', text, re.DOTALL)
+        if match_obj:
+            return json.loads(match_obj.group())
+    except Exception:
+        pass
+        
+    # If we get here, the AI output was likely malformed or empty
+    # Consider logging 'text' here for debugging
+    return []
 
 # ==========================================
 # ✅ DB: cached connection + safe cursor context
@@ -1477,3 +1498,4 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+

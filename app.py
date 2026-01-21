@@ -13,7 +13,6 @@ import json
 import requests
 import base64
 from io import BytesIO
-from openai import OpenAI
 from contextlib import contextmanager
 
 # ==========================================
@@ -91,28 +90,12 @@ try:
     SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
     SUPABASE_BUCKET = st.secrets.get("SUPABASE_STORAGE_BUCKET", "pharmpilot")
     SUPABASE_PDF_PREFIX = st.secrets.get("SUPABASE_PDF_PREFIX", "lectures")
-    
-    # OpenAI fallback
-    OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-    OPENAI_TEXT_MODEL = st.secrets.get("OPENAI_TEXT_MODEL", "gpt-4o-mini")
-    OPENAI_VISION_MODEL = st.secrets.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
-    openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
-    # Local Ollama
-    OLLAMA_ENABLED = bool(st.secrets.get("OLLAMA_ENABLED", True))  # Default True for you
-    OLLAMA_URL = st.secrets.get("OLLAMA_URL", "http://127.0.0.1:11434")
-    OLLAMA_TEXT_MODEL = st.secrets.get("OLLAMA_TEXT_MODEL", "qwen2.5:7b-instruct")
-    OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
-
-except Exception:
-    st.error("Missing Secrets! Check .streamlit/secrets.toml")
-    st.stop()
 
 # ✅ UPDATED PRIORITY: Local First -> Then Cloud Fallback
 PROVIDER_ORDER = []
 if OLLAMA_ENABLED:
     PROVIDER_ORDER.append("ollama")
-PROVIDER_ORDER.extend(["gemini", "openai"])
+PROVIDER_ORDER.extend(["gemini"])
 
 # ✅ GEMINI CONFIGURATION
 genai.configure(api_key=GOOGLE_API_KEY)
@@ -347,51 +330,6 @@ def ollama_generate_vision(prompt: str, pil_images: list, model: str, temperatur
     )
     r.raise_for_status()
     return r.json().get("response", "")
-
-# ==========================================
-# 🧠 OPENAI HELPERS (CLOUD FALLBACK)
-# ==========================================
-def openai_generate_text(prompt: str, model: str, timeout=180) -> str:
-    if not openai_client:
-        raise RuntimeError("OpenAI client not configured (missing OPENAI_API_KEY).")
-    resp = openai_client.responses.create(
-        model=model,
-        input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
-        timeout=timeout,
-    )
-    out_text = ""
-    for item in (resp.output or []):
-        for part in (getattr(item, "content", []) or []):
-            if getattr(part, "type", "") in ("output_text", "text"):
-                out_text += getattr(part, "text", "") or ""
-    return out_text.strip()
-
-def openai_generate_vision(prompt: str, pil_images: list, model: str, timeout=240) -> str:
-    if not openai_client:
-        raise RuntimeError("OpenAI client not configured (missing OPENAI_API_KEY).")
-
-    def pil_to_data_url(img):
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        return f"data:image/png;base64,{b64}"
-
-    content = [{"type": "input_text", "text": prompt}]
-    for img in pil_images:
-        content.append({"type": "input_image", "image_url": pil_to_data_url(img)})
-
-    resp = openai_client.responses.create(
-        model=model,
-        input=[{"role": "user", "content": content}],
-        timeout=timeout,
-    )
-
-    out_text = ""
-    for item in (resp.output or []):
-        for part in (getattr(item, "content", []) or []):
-            if getattr(part, "type", "") in ("output_text", "text"):
-                out_text += getattr(part, "text", "") or ""
-    return out_text.strip()
 
 # ==========================================
 # 🧠 PDF UTILITIES
@@ -1471,3 +1409,4 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+

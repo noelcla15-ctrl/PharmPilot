@@ -130,6 +130,8 @@ safety_settings = {
 flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
 quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
 
+SLIDE_DIR = "lecture_slides"
+os.makedirs(SLIDE_DIR, exist_ok=True)
 # ==========================================
 # 🧠 ROBUST JSON PARSER (Fixes AI "Chatter")
 # ==========================================
@@ -1498,4 +1500,5 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 

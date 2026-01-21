@@ -81,20 +81,44 @@ st.sidebar.markdown("---")
 # ==========================================
 # ⚙️ SECRETS & SETUP
 # ==========================================
+# ==========================================
+# ⚙️ SECRETS & SETUP
+# ==========================================
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     DB_URL = st.secrets["SUPABASE_DB_URL"]
-    
+
     # ... (Supabase secrets) ...
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
     SUPABASE_BUCKET = st.secrets.get("SUPABASE_STORAGE_BUCKET", "pharmpilot")
     SUPABASE_PDF_PREFIX = st.secrets.get("SUPABASE_PDF_PREFIX", "lectures")
+    
+    # Define Ollama and OpenAI settings (I notice these are referenced but not defined in your code)
+    OLLAMA_ENABLED = st.secrets.get("OLLAMA_ENABLED", False)
+    OLLAMA_URL = st.secrets.get("OLLAMA_URL", "http://localhost:11434")
+    OLLAMA_TEXT_MODEL = st.secrets.get("OLLAMA_TEXT_MODEL", "llama3.1:8b")
+    OLLAMA_VISION_MODEL = st.secrets.get("OLLAMA_VISION_MODEL", "llava:34b")
+    
+    # OpenAI settings
+    OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+    openai_client = None
+    if OPENAI_API_KEY:
+        import openai
+        openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        OPENAI_TEXT_MODEL = st.secrets.get("OPENAI_TEXT_MODEL", "gpt-4")
+        OPENAI_VISION_MODEL = st.secrets.get("OPENAI_VISION_MODEL", "gpt-4-vision-preview")
+
+except Exception as e:
+    st.error(f"Error loading secrets: {e}")
+    st.stop()
 
 # ✅ UPDATED PRIORITY: Local First -> Then Cloud Fallback
-    PROVIDER_ORDER = []
+PROVIDER_ORDER = []
 if OLLAMA_ENABLED:
     PROVIDER_ORDER.append("ollama")
+if openai_client:
+    PROVIDER_ORDER.append("openai")
 PROVIDER_ORDER.extend(["gemini"])
 
 # ✅ GEMINI CONFIGURATION
@@ -1409,5 +1433,6 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 

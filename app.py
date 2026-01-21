@@ -125,9 +125,8 @@ safety_settings = {
     "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
 }
 
-# ✅ SWITCHED TO GEMINI 3 FLASH (To fix Rate Limits)
-# If 3-flash is not available in your region, revert to "gemini-1.5-flash"
-flash_model = genai.GenerativeModel("gemini-3-flash", safety_settings=safety_settings)
+# ✅ SWITCHED TO GEMINI 2.5 FLASH (Stable Version)
+flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
 quiz_model = genai.GenerativeModel("gemini-2.5-pro", safety_settings=safety_settings)
 
 SLIDE_DIR = "lecture_slides"
@@ -1471,4 +1470,3 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
-

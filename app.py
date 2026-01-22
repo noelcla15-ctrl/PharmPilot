@@ -234,6 +234,21 @@ def ollama_generate_vision(prompt: str, pil_images: list, model: str, temperatur
     except Exception as e:
         st.error(f"Ollama vision error: {e}")
         return ""
+def ollama_is_up(ollama_url: str) -> bool:
+    """Check if Ollama is running with better error reporting"""
+    try:
+        response = requests.get(f"{ollama_url}/api/tags", timeout=5)
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"Ollama HTTP error: {response.status_code}")
+            return False
+    except requests.exceptions.ConnectionError:
+        print("Ollama ConnectionError: Is Ollama running?")
+        return False
+    except Exception as e:
+        print(f"Ollama check error: {e}")
+        return False
 
 # ==========================================
 # 🧠 BASE64 IMAGE UTILITY (FULLY CORRECTED)
@@ -282,6 +297,269 @@ def parse_json_response(response_text, payload_name):
         pass
         
     return []
+
+    # ==========================================
+# 🔍 DETAILED DEBUGGING AND DIAGNOSTICS
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔍 Debug Diagnostics")
+
+# Test Ollama connection in detail
+def diagnose_ollama():
+    st.sidebar.write("**Ollama Diagnostics:**")
+    
+    # Test basic connectivity
+    try:
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+        if response.status_code == 200:
+            st.sidebar.success("✅ Ollama server: Reachable")
+            models = response.json().get("models", [])
+            st.sidebar.write(f"📊 Available models: {len(models)}")
+            for model in models[:3]:  # Show first 3 models
+                st.sidebar.write(f"   • {model.get('name', 'Unknown')}")
+            return True, models
+        else:
+            st.sidebar.error(f"❌ Ollama server: HTTP {response.status_code}")
+            return False, []
+    except requests.exceptions.ConnectionError:
+        st.sidebar.error("❌ Ollama server: Connection refused (is Ollama running?)")
+        return False, []
+    except Exception as e:
+        st.sidebar.error(f"❌ Ollama server: Unexpected error - {e}")
+        return False, []
+
+# Test Gemini connection in detail  
+def diagnose_gemini():
+    st.sidebar.write("**Gemini Diagnostics:**")
+    
+    if not GOOGLE_API_KEY:
+        st.sidebar.error("❌ Gemini: No API key found")
+        return False
+    
+    try:
+        # Simple test call
+        test_model = genai.GenerativeModel("gemini-1.0-flash")
+        response = test_model.generate_content("Say 'OK'")
+        st.sidebar.success("✅ Gemini: API key valid and working")
+        return True
+    except Exception as e:
+        error_msg = str(e)
+        if "429" in error_msg or "quota" in error_msg.lower():
+            st.sidebar.error("❌ Gemini: Quota exceeded (free tier limit)")
+        elif "404" in error_msg:
+            st.sidebar.error("❌ Gemini: Model not found")
+        elif "401" in error_msg or "403" in error_msg:
+            st.sidebar.error("❌ Gemini: Invalid API key or permissions")
+        else:
+            st.sidebar.error(f"❌ Gemini: {error_msg}")
+        return False
+
+# Run diagnostics when button clicked
+if st.sidebar.button("🚨 Run Detailed Diagnostics"):
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔧 Running Diagnostics...")
+    
+    # Ollama diagnostics
+    ollama_ok, ollama_models = diagnose_ollama()
+    
+    # Gemini diagnostics
+    gemini_ok = diagnose_gemini()
+    
+    # Overall status
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📊 Overall Status")
+    
+    if ollama_ok:
+        st.sidebar.success("🎯 RECOMMENDATION: Use Ollama (local, no limits)")
+        # Auto-set provider order
+        PROVIDER_ORDER = ["ollama"]
+        st.sidebar.write(f"📍 Provider order: {PROVIDER_ORDER}")
+    elif gemini_ok:
+        st.sidebar.warning("⚠️ RECOMMENDATION: Use Gemini (but watch quota)")
+        PROVIDER_ORDER = ["gemini"] 
+        st.sidebar.write(f"📍 Provider order: {PROVIDER_ORDER}")
+    else:
+        st.sidebar.error("💥 CRITICAL: No AI providers available!")
+        PROVIDER_ORDER = []
+        st.sidebar.write("📍 Provider order: [] - App will not work")
+
+# ==========================================
+# 🛠️ OLLAMA SETUP ASSISTANT
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🛠️ Ollama Setup Assistant")
+
+# Interactive setup guide
+setup_step = st.sidebar.selectbox("Follow these steps:", 
+    ["1. Check Requirements", "2. Install Ollama", "3. Start Service", "4. Pull Models", "5. Verify"])
+
+if setup_step == "1. Check Requirements":
+    st.sidebar.write("**System Requirements:**")
+    st.sidebar.write("- Python 3.8+")
+    st.sidebar.write("- 8GB+ RAM recommended")
+    st.sidebar.write("- 10GB+ free disk space")
+    
+elif setup_step == "2. Install Ollama":
+    st.sidebar.code("""
+# On macOS/Linux:
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# On Windows:
+# Download from https://ollama.ai/download
+""")
+
+elif setup_step == "3. Start Service":
+    st.sidebar.code("""
+# Start Ollama (keep this terminal open):
+ollama serve
+
+# Expected output: 
+# >>> Ollama is running on http://127.0.0.1:11434
+""")
+    
+    # Test if running
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code == 200:
+            st.sidebar.success("✅ Ollama is running!")
+        else:
+            st.sidebar.warning("🔄 Ollama not detected yet...")
+    except:
+        st.sidebar.warning("🔄 Ollama not detected yet...")
+
+elif setup_step == "4. Pull Models":
+    st.sidebar.code("""
+# In a NEW terminal (while 'ollama serve' runs in another):
+ollama pull llama3.1:8b
+ollama pull llava:34b
+
+# Smaller alternatives if needed:
+# ollama pull llama3.2:3b
+# ollama pull llava:7b
+""")
+    
+    # Check current models
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code == 200:
+            models = response.json().get("models", [])
+            st.sidebar.write(f"📥 Current models: {len(models)}")
+            for model in models:
+                st.sidebar.write(f"   • {model.get('name', 'Unknown')}")
+    except:
+        pass
+
+elif setup_step == "5. Verify":
+    st.sidebar.code("""
+# Test if everything works:
+curl http://localhost:11434/api/tags
+
+# Test model response:
+curl http://localhost:11434/api/generate -d '{
+  "model": "llama3.1:8b",
+  "prompt": "Hello",
+  "stream": false
+}'
+""")
+    
+    # Run final test
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code == 200:
+            models = response.json().get("models", [])
+            if models:
+                st.sidebar.success("✅ Ollama setup complete!")
+                st.sidebar.balloons()
+            else:
+                st.sidebar.warning("⚠️ Ollama running but no models pulled")
+        else:
+            st.sidebar.error("❌ Ollama not responding")
+    except:
+        st.sidebar.error("❌ Ollama not running")
+
+# ==========================================
+# 🧪 TEST ACTUAL FUNCTIONALITY
+# ==========================================
+if st.sidebar.button("🔬 Test Flashcard Generation"):
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🧪 Functional Test")
+    
+    # Simple test case that doesn't require PDFs
+    test_prompt = """
+Create 2 pharmacy flashcards in JSON format:
+[
+{"front": "What is the mechanism of aspirin?", "back": "COX inhibitor"},
+{"front": "ACE inhibitor suffix?", "back": "-pril"}
+]
+"""
+    
+    # Test Ollama first
+    if ollama_is_up(OLLAMA_URL):
+        st.sidebar.write("Testing Ollama...")
+        try:
+            response = ollama_generate_text(test_prompt, OLLAMA_TEXT_MODEL)
+            if response:
+                parsed = parse_json_response(response, "test")
+                if parsed:
+                    st.sidebar.success("✅ Ollama: Flashcard generation WORKS!")
+                    st.sidebar.write(f"Generated {len(parsed)} cards")
+                else:
+                    st.sidebar.warning("⚠️ Ollama: Response parsing failed")
+            else:
+                st.sidebar.error("❌ Ollama: Empty response")
+        except Exception as e:
+            st.sidebar.error(f"❌ Ollama: Error - {e}")
+    
+    # Test Gemini as fallback
+    elif gemini_enabled:
+        st.sidebar.write("Testing Gemini...")
+        try:
+            response = flash_model.generate_content(test_prompt)
+            parsed = parse_json_response(response.text, "test")
+            if parsed:
+                st.sidebar.success("✅ Gemini: Flashcard generation WORKS!")
+            else:
+                st.sidebar.warning("⚠️ Gemini: Response parsing failed")
+        except Exception as e:
+            st.sidebar.error(f"❌ Gemini: Error - {e}")
+    else:
+        st.sidebar.error("❌ No AI providers available for testing")
+
+# ==========================================
+# 📋 CURRENT CONFIGURATION DISPLAY
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📋 Current Configuration")
+
+st.sidebar.write(f"**Ollama URL:** {OLLAMA_URL}")
+st.sidebar.write(f"**Ollama Text Model:** {OLLAMA_TEXT_MODEL}")
+st.sidebar.write(f"**Ollama Vision Model:** {OLLAMA_VISION_MODEL}")
+st.sidebar.write(f"**Slide Directory:** {SLIDE_DIR}")
+st.sidebar.write(f"**Provider Order:** {PROVIDER_ORDER}")
+
+# ==========================================
+# 🚨 EMERGENCY FALLBACK MODE
+# ==========================================
+if st.sidebar.checkbox("🆘 Enable Manual Fallback Mode"):
+    st.sidebar.warning("Manual mode enabled - using simple text processing")
+    
+    def emergency_generate_cards(lecture_id, objectives_input):
+        """Simple fallback when AI is unavailable"""
+        st.sidebar.info("Using emergency fallback mode")
+        # Create simple cards from objectives
+        objectives = objectives_input.split('\n')
+        cards = []
+        for obj in objectives[:5]:  # Max 5 cards
+            if obj.strip() and len(obj.strip()) > 10:
+                cards.append((
+                    f"What is {obj.strip()}?",
+                    f"Study this concept: {obj.strip()}"
+                ))
+        return cards, "Emergency fallback used"
+    
+    # Override the hybrid function temporarily
+    generate_cards_hybrid = emergency_generate_cards
+
 
 # ==========================================
 # ✅ DB: cached connection + safe cursor context
@@ -1544,6 +1822,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 

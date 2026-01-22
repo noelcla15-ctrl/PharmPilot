@@ -2,7 +2,7 @@ import streamlit as st
 import psycopg2
 import google.generativeai as genai
 from datetime import date, timedelta
-import fitz  # PyMuPDF
+import fitz # PyMuPDF
 import PIL.Image
 import time
 import pandas as pd
@@ -14,6 +14,12 @@ import requests
 import base64
 from io import BytesIO
 from contextlib import contextmanager
+
+# ==========================================
+# ✅ CONSTANTS (ADD THIS SECTION)
+# ==========================================
+SLIDE_DIR = "lecture_slides"
+os.makedirs(SLIDE_DIR, exist_ok=True)
 
 # ==========================================
 # ✅ ENV DETECTION + PROVIDER ORDER
@@ -122,228 +128,123 @@ if openai_client:
 PROVIDER_ORDER.extend(["gemini"])
 
 # ==========================================
-# ✅ GEMINI CONFIGURATION - USING AVAILABLE MODELS
+# 🧠 OLLAMA CONFIGURATION (PRIMARY - LOCAL AI)
 # ==========================================
-genai.configure(api_key=GOOGLE_API_KEY)
+OLLAMA_ENABLED = True
+OLLAMA_URL = "http://localhost:11434"
+OLLAMA_TEXT_MODEL = "llama3.1:8b"  # Adjust based on what you have installed
+OLLAMA_VISION_MODEL = "llava:34b"   # Adjust based on what you have installed
 
-safety_settings = {
-    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-}
-
-# Use the available models from your list
-flash_model = genai.GenerativeModel("gemini-2.5-flash", safety_settings=safety_settings)
-quiz_model = genai.GenerativeModel("gemini-3-flash", safety_settings=safety_settings)  # This should work now!
-
-# ==========================================
-# ✅ UPDATE PROVIDER ORDER (Gemini only)
-# ==========================================
-PROVIDER_ORDER = ["gemini"]
-
-# ==========================================
-# ✅ FIXED CONNECTION TESTING
-# ==========================================
-def test_gemini_connection():
-    """Test if Gemini models are working"""
+# Test Ollama connection
+def ollama_is_up(ollama_url: str) -> bool:
     try:
-        # Test the flash model
-        test_prompt = "Respond with exactly: OK"
-        response = flash_model.generate_content(test_prompt)
-        
-        # Also test the quiz model
-        test_quiz_prompt = "Say 'QUIZ OK' in JSON format: {'status': 'quiz_ok'}"
-        quiz_response = quiz_model.generate_content(test_quiz_prompt)
-        
-        return True, f"Both models working: {response.text.strip()}, {quiz_response.text.strip()}"
-    except Exception as e:
-        return False, f"Model error: {str(e)}"
+        response = requests.get(f"{ollama_url}/api/tags", timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
 
-# Add this to verify models are accessible
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔧 Available Models")
-st.sidebar.write(f"Flash: gemini-2.5-flash")
-st.sidebar.write(f"Quiz: gemini-3-flash")
-
-# Test connection
-gemini_ok, gemini_msg = test_gemini_connection()
-if gemini_ok:
-    st.sidebar.success("✅ Gemini Models: Connected")
-else:
-    st.sidebar.error(f"❌ Gemini: {gemini_msg}")
+# Check available models
+def get_available_ollama_models():
+    try:
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        if response.status_code == 200:
+            models = response.json().get("models", [])
+            return [model.get("name", "") for model in models]
+    except Exception:
+        pass
+    return []
 
 # ==========================================
-# ✅ ENHANCED ERROR HANDLING FOR GEMINI
+# ⚠️ GEMINI CONFIGURATION (FALLBACK ONLY - DISABLED DUE TO QUOTA)
 # ==========================================
-def safe_gemini_generate(model, prompt, max_retries=3):
-    """Wrapper with retry logic for Gemini API calls"""
-    for attempt in range(max_retries):
+gemini_enabled = False  # Disable Gemini due to quota issues
+try:
+    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY")
+    if GOOGLE_API_KEY:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        # Test if we can actually use Gemini (not over quota)
         try:
-            response = model.generate_content(prompt)
-            return response, None
+            test_model = genai.GenerativeModel("gemini-2.5-flash")
+            test_response = test_model.generate_content("Test")
+            gemini_enabled = True
         except Exception as e:
-            if attempt == max_retries - 1:  # Last attempt
-                return None, f"Gemini API failed after {max_retries} attempts: {str(e)}"
-            time.sleep(2)  # Wait before retry
-    return None, "Unexpected error in Gemini call"
+            if "quota" in str(e).lower() or "429" in str(e):
+                gemini_enabled = False
+            else:
+                gemini_enabled = False
+except Exception:
+    gemini_enabled = False
 
 # ==========================================
-# ✅ UPDATED EXTRACT_HIGH_YIELD FUNCTION
+# ✅ PROVIDER ORDER (OLLAMA ONLY SINCE GEMINI HAS QUOTA ISSUES)
 # ==========================================
-def extract_high_yield(batch_entries, objectives_str, start_idx, provider="gemini"):
-    slides_blob = build_slides_blob(batch_entries, start_idx)
+ollama_running = ollama_is_up(OLLAMA_URL)
+available_models = get_available_ollama_models() if ollama_running else []
 
-    prompt = f"""
-You are a strict pharmacy exam content curator analyzing lecture slides.
+if ollama_running and available_models:
+    PROVIDER_ORDER = ["ollama"]
+    st.sidebar.success(f"✅ Ollama: Running ({len(available_models)} models)")
+else:
+    PROVIDER_ORDER = []
+    st.sidebar.error("❌ Ollama: Not running or no models available")
 
-OBJECTIVES (use these to decide relevance):
-{objectives_str}
-
-ANALYZE EACH SLIDE FOR:
-- Relevance to objectives (true/false)
-- Why it's relevant or not
-- Key terms to remember
-- Key points/facts
-
-Return RAW JSON ONLY in this exact format:
-[
-{{
-    "slide": 1,
-    "relevant": true,
-    "why": "Contains key drug mechanism information",
-    "key_terms": ["pharmacokinetics", "CYP450", "metabolism"],
-    "key_points": ["Drug A inhibits COX enzymes", "Half-life is 4-6 hours"]
-}},
-{{
-    "slide": 2, 
-    "relevant": false,
-    "why": "Contains only administrative content",
-    "key_terms": [],
-    "key_points": []
-}}
-]
-
-SLIDES TO ANALYZE:
-{slides_blob}
-"""
-
-    if provider == "gemini":
-        response, error = safe_gemini_generate(flash_model, prompt)
-        if error:
-            st.error(f"Gemini API Error: {error}")
-            return []
-        
-        data = parse_json_response(response.text, "high_yield")
-        return data if isinstance(data, list) else []
-    
-    return []
+# Add Gemini as fallback only if it's not over quota
+if gemini_enabled:
+    PROVIDER_ORDER.append("gemini")
+    st.sidebar.info("✅ Gemini: Available (fallback)")
+else:
+    st.sidebar.warning("❌ Gemini: Quota exceeded or not configured")
 
 # ==========================================
-# ✅ UPDATED FLASHCARD GENERATION
+# 🧠 IMPROVED OLLAMA FUNCTIONS
 # ==========================================
-def generate_cards_from_notes(notes_blob, objectives_str, provider="gemini"):
-    if not notes_blob:
-        return []
+def ollama_generate_text(prompt: str, model: str, temperature=0.2, timeout=180) -> str:
+    """Generate text using Ollama with better error handling"""
+    try:
+        response = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": temperature},
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json().get("response", "")
+    except Exception as e:
+        st.error(f"Ollama API error: {e}")
+        return ""
 
-    prompt = f"""
-You are a Pharmacy Professor creating high-yield flashcards for exam preparation.
-
-OBJECTIVES:
-{objectives_str}
-
-HIGH-YIELD NOTES:
-{notes_blob}
-
-Create 3-8 flashcards focusing on:
-- Drug mechanisms (MOA), indications, adverse effects
-- Key formulas and calculations
-- Clinical decision rules
-- Important comparisons and contrasts
-
-Return RAW JSON ONLY in this format:
-[
-{{
-    "front": "What is the mechanism of metformin?",
-    "back": "Activates AMPK, reducing hepatic glucose production and improving insulin sensitivity"
-}},
-{{
-    "front": "ACE inhibitors end with which suffix?",
-    "back": "-pril (e.g., lisinopril, enalapril)"
-}}
-]
-"""
-
-    if provider == "gemini":
-        response, error = safe_gemini_generate(flash_model, prompt)
-        if error:
-            st.error(f"Gemini flashcard Error: {error}")
-            return []
-        
-        data = parse_json_response(response.text, "flashcards")
-        if isinstance(data, list):
-            return [(x["front"], x["back"]) for x in data if isinstance(x, dict) and "front" in x and "back" in x]
-    
-    return []
+def ollama_generate_vision(prompt: str, pil_images: list, model: str, temperature=0.2, timeout=240) -> str:
+    """Generate text from images using Ollama vision models"""
+    try:
+        images_b64 = [pil_to_base64_png(img) for img in pil_images]
+        response = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "images": images_b64,
+                "stream": False,
+                "options": {"temperature": temperature},
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json().get("response", "")
+    except Exception as e:
+        st.error(f"Ollama vision error: {e}")
+        return ""
 
 # ==========================================
-# ✅ UPDATED QUIZ GENERATION
+# 🧠 BASE64 IMAGE UTILITY (ADD IF MISSING)
 # ==========================================
-def generate_interactive_quiz_gemini(content):
-    """Generate quiz using Gemini 3 Flash"""
-    prompt = """
-Create a 3-question multiple choice quiz for pharmacy students.
-Focus on high-yield exam topics like drug mechanisms, calculations, clinical pearls.
-
-Return RAW JSON ONLY:
-[
-{{
-    "question": "What is the first-line treatment for uncomplicated UTI in non-pregnant women?",
-    "options": [
-        "A) Nitrofurantoin 100 mg BID for 5 days",
-        "B) Ciprofloxacin 500 mg BID for 7 days", 
-        "C) Amoxicillin 500 mg TID for 7 days",
-        "D) Doxycycline 100 mg BID for 7 days"
-    ],
-    "correct_index": 0,
-    "explanation": "Nitrofurantoin is first-line due to good efficacy and low resistance rates."
-}}
-]
-"""
-
-    response, error = safe_gemini_generate(quiz_model, prompt + "\n\nCONTEXT:\n" + str(content))
-    if error:
-        return [{"error": f"Quiz generation failed: {error}"}]
-    
-    data = parse_json_response(response.text, "quiz")
-    return data if isinstance(data, list) else [{"error": "Invalid quiz format"}]
-
-# ==========================================
-# ✅ DEBUG FUNCTIONALITY
-# ==========================================
-if st.sidebar.button("Test Gemini Models"):
-    with st.sidebar.expander("Model Test Results"):
-        # Test flash model
-        st.write("**Testing gemini-2.5-flash:**")
-        test_prompt = "Create one pharmacy flashcard in JSON: [{'front': 'Test', 'back': 'Success'}]"
-        response, error = safe_gemini_generate(flash_model, test_prompt)
-        if error:
-            st.error(f"Flash model error: {error}")
-        else:
-            st.success("✅ Flash model working")
-            st.code(response.text[:200] + "..." if len(response.text) > 200 else response.text)
-        
-        # Test quiz model  
-        st.write("**Testing gemini-3-flash:**")
-        quiz_test = "Create one quiz question in JSON about pharmacy"
-        response, error = safe_gemini_generate(quiz_model, quiz_test)
-        if error:
-            st.error(f"Quiz model error: {error}")
-        else:
-            st.success("✅ Quiz model working")
-            st.code(response.text[:200] + "..." if len(response.text) > 200 else response.text)
-
-
+def pil_to_base64_png(pil_img) -> str:
+    buf = BytesIO()
+    pil_img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8.
 
 # ==========================================
 # 🧠 ROBUST JSON PARSER (Fixes AI "Chatter")
@@ -1638,6 +1539,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 

@@ -87,9 +87,6 @@ st.sidebar.markdown("---")
 # ==========================================
 # ⚙️ SECRETS & SETUP
 # ==========================================
-# ==========================================
-# ⚙️ SECRETS & SETUP
-# ==========================================
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     DB_URL = st.secrets["SUPABASE_DB_URL"]
@@ -239,12 +236,20 @@ def ollama_generate_vision(prompt: str, pil_images: list, model: str, temperatur
         return ""
 
 # ==========================================
-# 🧠 BASE64 IMAGE UTILITY (ADD IF MISSING)
+# 🧠 BASE64 IMAGE UTILITY (FULLY CORRECTED)
 # ==========================================
 def pil_to_base64_png(pil_img) -> str:
-    buf = BytesIO()
-    pil_img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8.
+    """
+    Convert PIL Image to base64 encoded PNG string
+    """
+    try:
+        buf = BytesIO()
+        pil_img.save(buf, format="PNG")
+        encoded_string = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return encoded_string
+    except Exception as e:
+        st.error(f"Image encoding error: {e}")
+        return ""
 
 # ==========================================
 # 🧠 ROBUST JSON PARSER (Fixes AI "Chatter")
@@ -1539,6 +1544,7 @@ elif nav == "Editor":
             st.toast("Saved successfully!", icon="✅")
     else:
         st.info("No topics found.")
+
 
 
 
